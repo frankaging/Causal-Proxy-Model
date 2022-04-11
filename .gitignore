@@ -1,5 +1,7 @@
+datasets/*
 *cache/
-*.ipynb
+playground.ipynb
+*_training.ipynb
 # Byte-compiled / optimized / DLL files
 __pycache__/
 *.py[cod]
