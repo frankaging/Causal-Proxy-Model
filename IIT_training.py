@@ -4,7 +4,6 @@
 # In[1]:
 
 
-import logging
 import os
 import random
 import sys
@@ -35,14 +34,14 @@ from transformers.trainer_utils import get_last_checkpoint
 from transformers.utils import check_min_version
 from transformers.utils.versions import require_version
 
+from models.modelings_roberta import *
+
 # Will error if the minimal version of Transformers is not installed. Remove at your own risks.
 task_to_keys = {
     "opentable": ("text", None),
-    "opentable-absa": ("text", "aspect"),
-    "opentable-multi": ("description", None),
-    "opentable-iit": ("description_base", "description_source"),
 }
 
+import logging
 logger = logging.getLogger(__name__)
 
 
@@ -65,7 +64,7 @@ class DataTrainingArguments:
                   ", ".join(task_to_keys.keys())},
     )
     train_split_name: Optional[str] = field(
-        default=None,
+        default="train",
         metadata={"help": "The name of split this is trained on."},
     )
     eval_split_name: Optional[str] = field(
@@ -225,7 +224,205 @@ def main():
     transformers.utils.logging.enable_default_handler()
     transformers.utils.logging.enable_explicit_format()
     
-    print(training_args)
+    # make the name shorter.
+    # overwrite the output dir a little bit.
+    data_dir_postfix = data_args.dataset_name.strip("/").split("/")[-1]
+    if training_args.do_train:
+        if data_args.train_split_name:
+            sub_output_dir = f"{data_args.task_name}.train.{data_args.train_split_name}.{data_dir_postfix}"
+        else:
+            sub_output_dir = f"{data_args.task_name}.{data_dir_postfix}"
+    if training_args.do_eval:
+        if data_args.eval_split_name is not None:
+            sub_output_dir = f"{data_args.task_name}.eval.{data_args.eval_split_name}.{data_dir_postfix}"
+        else:
+            sub_output_dir = f"{data_args.task_name}.{data_dir_postfix}"
+    if training_args.do_train:
+        sub_output_dir = f"{sub_output_dir}_seed_{training_args.seed}"
+    training_args.output_dir = os.path.join(
+        training_args.output_dir, sub_output_dir)
+    # TODO: add split type for multi/iit?
+    training_args.run_name = sub_output_dir
+    logger.info(f"WANDB RUN NAME: {training_args.run_name}")
+    
+    # Log on each process the small summary:
+    logger.warning(
+        f"Process rank: {training_args.local_rank}, device: {training_args.device}, n_gpu: {training_args.n_gpu}"
+        + f"distributed training: {bool(training_args.local_rank != -1)}, 16-bits training: {training_args.fp16}"
+    )
+    logger.info(f"Training/evaluation parameters {training_args}")
+
+    # Detecting last checkpoint.
+    last_checkpoint = None
+    if os.path.isdir(training_args.output_dir) and training_args.do_train and not training_args.overwrite_output_dir:
+        last_checkpoint = get_last_checkpoint(training_args.output_dir)
+        if last_checkpoint is None and len(os.listdir(training_args.output_dir)) > 0:
+            raise ValueError(
+                f"Output directory ({training_args.output_dir}) already exists and is not empty. "
+                "Use --overwrite_output_dir to overcome."
+            )
+        elif last_checkpoint is not None and training_args.resume_from_checkpoint is None:
+            logger.info(
+                f"Checkpoint detected, resuming training at {last_checkpoint}. To avoid this behavior, change "
+                "the `--output_dir` or add `--overwrite_output_dir` to train from scratch."
+            )
+            
+    # Set seed before initializing model.
+    set_seed(training_args.seed)
+    
+    is_regression = False  # Ours: probably not a regression task?
+    if data_args.dataset_name is not None and os.path.isdir(data_args.dataset_name):
+        raw_datasets = load_from_disk(
+            data_args.dataset_name,
+        )
+    else:
+        raise ValueError(
+            "Need a huggingface datasets formatted directory for `dataset_name`.")
+        
+    label_list = sorted(list(set(raw_datasets["train"]["label"]).union(
+        set(raw_datasets["validation"]["label"]))))
+        
+    num_labels = len(label_list)
+    
+    # Load pretrained model and tokenizer
+    #
+    # In distributed training, the .from_pretrained methods guarantee that only one local process can concurrently
+    # download model & vocab.
+    config = AutoConfig.from_pretrained(
+        model_args.config_name if model_args.config_name else model_args.model_name_or_path,
+        num_labels=num_labels,
+        finetuning_task=data_args.task_name,
+        cache_dir=model_args.cache_dir,
+        revision=model_args.model_revision,
+        use_auth_token=True if model_args.use_auth_token else None,
+    )
+    
+    tokenizer = AutoTokenizer.from_pretrained(
+        model_args.tokenizer_name if model_args.tokenizer_name else model_args.model_name_or_path,
+        cache_dir=model_args.cache_dir,
+        use_fast=model_args.use_fast_tokenizer,
+        revision=model_args.model_revision,
+        use_auth_token=True if model_args.use_auth_token else None,
+    )
+    
+    model = IITRobertaForSequenceClassification.from_pretrained(
+        model_args.model_name_or_path,
+        from_tf=bool(".ckpt" in model_args.model_name_or_path),
+        config=config,
+        cache_dir=model_args.cache_dir,
+        revision=model_args.model_revision,
+        use_auth_token=True if model_args.use_auth_token else None,
+    )
+    
+    # Preprocessing the raw_datasets
+    if data_args.task_name is not None:
+        sentence1_key, sentence2_key = task_to_keys[data_args.task_name]
+    else:
+        # Again, we try to have some nice defaults but don't hesitate to tweak to your use case.
+        non_label_column_names = [
+            name for name in raw_datasets["train"].column_names if name != "label"]
+        if "sentence1" in non_label_column_names and "sentence2" in non_label_column_names:
+            sentence1_key, sentence2_key = "sentence1", "sentence2"
+        else:
+            if len(non_label_column_names) >= 2:
+                sentence1_key, sentence2_key = non_label_column_names[:2]
+            else:
+                sentence1_key, sentence2_key = non_label_column_names[0], None
+
+    # Padding strategy
+    if data_args.pad_to_max_length:
+        padding = "max_length"
+    else:
+        # We will pad later, dynamically at batch creation, to the max sequence length in each batch
+        # NOTE: priority for saving memory
+        padding = False
+        
+    # Some models have set the order of the labels to use, so let's make sure we do use it.
+    label_to_id = None
+    if (
+        model.config.label2id != PretrainedConfig(
+            num_labels=num_labels).label2id
+        and data_args.task_name is not None
+        and not is_regression
+    ):
+        # Some have all caps in their config, some don't.
+        label_name_to_id = {
+            k.lower(): v for k, v in model.config.label2id.items()}
+        if list(sorted(label_name_to_id.keys())) == list(sorted(label_list)):
+            label_to_id = {
+                i: int(label_name_to_id[label_list[i]]) for i in range(num_labels)}
+        else:
+            # TODO: check what should happen here for opentable-multi and -iit
+            logger.warning(
+                "Your model seems to have been trained with labels, but they don't match the dataset: ",
+                f"model labels: {list(sorted(label_name_to_id.keys()))}, dataset labels: {list(sorted(label_list))}."
+                "\nIgnoring the model labels as a result.",
+            )
+    elif data_args.task_name is None and not is_regression:
+        label_to_id = {v: i for i, v in enumerate(label_list)}
+        
+    if label_to_id is not None:
+        model.config.label2id = label_to_id
+        model.config.id2label = {
+            id: label for label, id in config.label2id.items()}
+    elif data_args.task_name is not None and not is_regression:
+        model.config.label2id = {l: i for i, l in enumerate(label_list)}
+        model.config.id2label = {
+            id: label for label, id in config.label2id.items()}
+
+    if data_args.max_seq_length > tokenizer.model_max_length:
+        logger.warning(
+            f"The max_seq_length passed ({data_args.max_seq_length}) is larger than the maximum length for the"
+            f"model ({tokenizer.model_max_length}). Using max_seq_length={tokenizer.model_max_length}."
+        )
+    max_seq_length = min(data_args.max_seq_length, tokenizer.model_max_length)
+    
+    def preprocess_function(examples):
+        # Tokenize the texts
+        args = (
+            (examples[sentence1_key],) if sentence2_key is None else (
+                examples[sentence1_key], examples[sentence2_key])
+        )
+        result = tokenizer(*args, padding=padding,
+                           max_length=max_seq_length, truncation=True)
+
+        # Map labels to IDs (not necessary for GLUE tasks)
+        if label_to_id is not None and "label" in examples:
+            result["label"] = [(label_to_id[l] if l != -1 else -1)
+                               for l in examples["label"]]
+        return result
+        
+    with training_args.main_process_first(desc="dataset map pre-processing"):
+        raw_datasets = raw_datasets.map(
+            preprocess_function,
+            batched=True,
+            load_from_cache_file=not data_args.overwrite_cache,
+            desc="Running tokenizer on dataset",
+        )
+    if training_args.do_train:
+        train_dataset = raw_datasets[data_args.train_split_name]
+        if data_args.max_train_samples is not None:
+            train_dataset = train_dataset.select(
+                range(data_args.max_train_samples))
+    
+    if training_args.do_eval:
+        eval_dataset = raw_datasets[data_args.eval_split_name]
+        if data_args.max_eval_samples is not None:
+            eval_dataset = eval_dataset.select(
+                range(data_args.max_eval_samples))
+            
+    # Log a few random samples from the training set:
+    if training_args.do_train:
+        for index in random.sample(range(len(train_dataset)), 3):
+            logger.info(
+                f"Sample {index} of the training set: {train_dataset[index]}.")
+
+    # Get the metric function
+    metric = load_metric("accuracy")
+    
+    
+            
+    
 
 
 # In[ ]:
