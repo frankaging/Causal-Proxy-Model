@@ -35,6 +35,7 @@ from transformers.utils import check_min_version
 from transformers.utils.versions import require_version
 
 from models.modelings_roberta import *
+from IITTrainer import *
 
 # Will error if the minimal version of Transformers is not installed. Remove at your own risks.
 task_to_keys = {
@@ -420,8 +421,35 @@ def main():
     # Get the metric function
     metric = load_metric("accuracy")
     
+    # Data collator will default to DataCollatorWithPadding when the tokenizer is passed to Trainer, so we change it if
+    # we already did the padding.
+    if data_args.pad_to_max_length:
+        data_collator = default_data_collator
+    elif training_args.fp16:
+        data_collator = DataCollatorWithPadding(
+            tokenizer, pad_to_multiple_of=8)
+    else:
+        data_collator = None
     
-            
+    low_level_model = InterventionableIITRobertaForSequenceClassification(
+        model=model
+    )
+    high_level_model = InterventionableAbstractionModelForABSA(
+        model=AbstractionModelForABSA()
+    )
+    
+    # Initialize our Trainer
+    trainer = ABSAIITTrainer(
+        low_level_model=low_level_model,
+        high_level_model=high_level_model,
+        args=training_args,
+        train_dataset=train_dataset if training_args.do_train else None,
+        eval_dataset=eval_dataset if training_args.do_eval else None,
+        data_collator=data_collator,
+    )
+    
+    logger.info("Hey Zen: Let's go get some drinks.")
+    trainer.train()
     
 
 

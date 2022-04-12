@@ -1006,7 +1006,24 @@ class IITRobertaForSequenceClassification(RobertaPreTrainedModel):
             attentions=outputs.attentions,
         )
 
-
+class InterventionableIITRobertaForSequenceClassification():
+    def __init__(
+        self,
+        model,
+    ):
+        self.model = model
+        
+    def forward(
+        self,
+        base, source,
+        base_intervention_mask,
+        source_intervention_mask,
+        base_labels=None,
+        source_labels=None,
+    ):
+        pass
+    
+    
 class RobertaClassificationHead(nn.Module):
     """Head for sentence-level classification tasks."""
 

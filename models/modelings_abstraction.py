@@ -6,7 +6,9 @@ class AbstractionModelForABSA(nn.Module):
         self,
     ):
         super().__init__()
-    
+        self.aspect_sequence = [
+            'ambiance_label', 'food_label', 'noise_label', 'service_label'
+        ]
     """
     0: neg
     1: pos
@@ -73,6 +75,9 @@ class InterventionableAbstractionModelForABSA():
         model,
     ):
         self.model = model
+        self.aspect_sequence = [
+            'ambiance_label', 'food_label', 'noise_label', 'service_label'
+        ]
 
     def forward(
         self,
