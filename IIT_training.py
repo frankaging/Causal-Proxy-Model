@@ -187,6 +187,12 @@ class ModelArguments:
             "with private models)."
         },
     )
+        
+    no_gpu: bool = field(
+        default=False,
+        metadata={
+            "help": "Device"}
+    ) 
 
 
 # In[ ]:
@@ -247,6 +253,7 @@ def main():
     logger.info(f"WANDB RUN NAME: {training_args.run_name}")
     
     # Log on each process the small summary:
+    device = torch.device("cpu") if model_args.no_gpu else torch.device("cuda")
     logger.warning(
         f"Process rank: {training_args.local_rank}, device: {training_args.device}, n_gpu: {training_args.n_gpu}"
         + f"distributed training: {bool(training_args.local_rank != -1)}, 16-bits training: {training_args.fp16}"
@@ -446,6 +453,7 @@ def main():
         train_dataset=train_dataset if training_args.do_train else None,
         eval_dataset=eval_dataset if training_args.do_eval else None,
         data_collator=data_collator,
+        device=device,
     )
     
     logger.info("Hey Zen: Let's go get some drinks.")

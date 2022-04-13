@@ -25,7 +25,6 @@ from torch import nn
 from torch.nn import BCEWithLogitsLoss, CrossEntropyLoss, MSELoss
 from collections import OrderedDict
 from typing import Mapping
-
 from transformers.activations import ACT2FN, gelu
 from transformers.modeling_outputs import (
     BaseModelOutputWithPastAndCrossAttentions,
@@ -49,6 +48,7 @@ import sys
 sys.path.append("..") # Adds higher directory to python modules path.
 from utils import logging
 logger = logging.get_logger(__name__)
+
 
 _CHECKPOINT_FOR_DOC = "roberta-base"
 _CONFIG_FOR_DOC = "RobertaConfig"
@@ -596,12 +596,13 @@ class RobertaLayer(nn.Module):
 
 # Copied from transformers.models.bert.modeling_bert.BertEncoder with Bert->Roberta
 class RobertaEncoder(nn.Module):
-    def __init__(self, config):
+    def __init__(self, config, intervention_h_dim):
         super().__init__()
         self.config = config
         self.layer = nn.ModuleList([RobertaLayer(config) for _ in range(config.num_hidden_layers)])
         self.gradient_checkpointing = False
-
+        self.intervention_h_dim = intervention_h_dim
+        
     def forward(
         self,
         hidden_states: torch.Tensor,
@@ -611,6 +612,12 @@ class RobertaEncoder(nn.Module):
         encoder_attention_mask: Optional[torch.FloatTensor] = None,
         past_key_values: Optional[Tuple[Tuple[torch.FloatTensor]]] = None,
         use_cache: Optional[bool] = None,
+        # counterfactual arguments
+        source_hidden_states=None,
+        base_intervention_corr=None,
+        source_intervention_corr=None,
+        all_layers=None,
+        # counterfactual arguments
         output_attentions: Optional[bool] = False,
         output_hidden_states: Optional[bool] = False,
         return_dict: Optional[bool] = True,
@@ -620,6 +627,7 @@ class RobertaEncoder(nn.Module):
         all_cross_attentions = () if output_attentions and self.config.add_cross_attention else None
 
         next_decoder_cache = () if use_cache else None
+        
         for i, layer_module in enumerate(self.layer):
             if output_hidden_states:
                 all_hidden_states = all_hidden_states + (hidden_states,)
@@ -667,7 +675,25 @@ class RobertaEncoder(nn.Module):
                 all_self_attentions = all_self_attentions + (layer_outputs[1],)
                 if self.config.add_cross_attention:
                     all_cross_attentions = all_cross_attentions + (layer_outputs[2],)
-
+                    
+            # INT_POINT_1
+            if all_layers and source_hidden_states:
+                for b in range(0, hidden_states.shape[0]):
+                    if base_intervention_corr[b] != -1:
+                        start_idx = base_intervention_corr[b]*self.intervention_h_dim
+                        end_idx = (base_intervention_corr[b]+1)*self.intervention_h_dim
+                        hidden_states[b][0][start_idx:end_idx] = \
+                            source_hidden_states[i+1][b][0][start_idx:end_idx]
+            
+        # INT_POINT_2
+        if not all_layers and source_hidden_states:
+            for b in range(0, hidden_states.shape[0]):
+                if base_intervention_corr[b] != -1:
+                    start_idx = base_intervention_corr[b]*self.intervention_h_dim
+                    end_idx = (base_intervention_corr[b]+1)*self.intervention_h_dim
+                    hidden_states[b][0][start_idx:end_idx] = \
+                        source_hidden_states[-1][b][0][start_idx:end_idx]
+        
         if output_hidden_states:
             all_hidden_states = all_hidden_states + (hidden_states,)
 
@@ -767,12 +793,12 @@ class RobertaModel(RobertaPreTrainedModel):
     _keys_to_ignore_on_load_missing = [r"position_ids"]
 
     # Copied from transformers.models.bert.modeling_bert.BertModel.__init__ with Bert->Roberta
-    def __init__(self, config, add_pooling_layer=True):
+    def __init__(self, config, intervention_h_dim, add_pooling_layer=True):
         super().__init__(config)
         self.config = config
 
         self.embeddings = RobertaEmbeddings(config)
-        self.encoder = RobertaEncoder(config)
+        self.encoder = RobertaEncoder(config, intervention_h_dim)
 
         self.pooler = RobertaPooler(config) if add_pooling_layer else None
 
@@ -802,6 +828,12 @@ class RobertaModel(RobertaPreTrainedModel):
         position_ids: Optional[torch.Tensor] = None,
         head_mask: Optional[torch.Tensor] = None,
         inputs_embeds: Optional[torch.Tensor] = None,
+        # counterfactual arguments
+        source_hidden_states=None,
+        base_intervention_corr=None,
+        source_intervention_corr=None,
+        all_layers=None,
+        # counterfactual arguments
         encoder_hidden_states: Optional[torch.Tensor] = None,
         encoder_attention_mask: Optional[torch.Tensor] = None,
         past_key_values: Optional[List[torch.FloatTensor]] = None,
@@ -904,6 +936,12 @@ class RobertaModel(RobertaPreTrainedModel):
             encoder_attention_mask=encoder_extended_attention_mask,
             past_key_values=past_key_values,
             use_cache=use_cache,
+            # counterfactual arguments
+            source_hidden_states=source_hidden_states,
+            base_intervention_corr=base_intervention_corr,
+            source_intervention_corr=source_intervention_corr,
+            all_layers=all_layers,
+            # counterfactual arguments
             output_attentions=output_attentions,
             output_hidden_states=output_hidden_states,
             return_dict=return_dict,
@@ -926,14 +964,23 @@ class RobertaModel(RobertaPreTrainedModel):
 class IITRobertaForSequenceClassification(RobertaPreTrainedModel):
     _keys_to_ignore_on_load_missing = [r"position_ids"]
 
-    def __init__(self, config):
+    def __init__(
+        self, config,
+        intervention_h_dim=100,
+        num_aspect_labels=3,
+    ):
         super().__init__(config)
         self.num_labels = config.num_labels
         self.config = config
 
-        self.roberta = RobertaModel(config, add_pooling_layer=False)
+        self.roberta = RobertaModel(
+            config, intervention_h_dim, add_pooling_layer=False
+        )
         self.classifier = RobertaClassificationHead(config)
-
+        self.multitask_classifier = MultiTaskClassificationHead(
+            config, intervention_h_dim, num_aspect_labels
+        )
+        self.intervention_h_dim = intervention_h_dim
         # Initialize weights and apply final processing
         self.post_init()
 
@@ -946,6 +993,12 @@ class IITRobertaForSequenceClassification(RobertaPreTrainedModel):
         head_mask: Optional[torch.FloatTensor] = None,
         inputs_embeds: Optional[torch.FloatTensor] = None,
         labels: Optional[torch.LongTensor] = None,
+        # counterfactual arguments
+        source_hidden_states=None,
+        base_intervention_corr=None,
+        source_intervention_corr=None,
+        all_layers=None,
+        # counterfactual arguments
         output_attentions: Optional[bool] = None,
         output_hidden_states: Optional[bool] = None,
         return_dict: Optional[bool] = None,
@@ -965,12 +1018,24 @@ class IITRobertaForSequenceClassification(RobertaPreTrainedModel):
             position_ids=position_ids,
             head_mask=head_mask,
             inputs_embeds=inputs_embeds,
+            # counterfactual arguments
+            source_hidden_states=source_hidden_states,
+            base_intervention_corr=base_intervention_corr,
+            source_intervention_corr=source_intervention_corr,
+            all_layers=all_layers,
+            # counterfactual arguments
             output_attentions=output_attentions,
             output_hidden_states=output_hidden_states,
             return_dict=return_dict,
         )
         sequence_output = outputs[0]
         logits = self.classifier(sequence_output)
+        
+        mul_pooled_output = sequence_output[:,0,:]
+        mul_logits_0 = self.multitask_classifier(mul_pooled_output[:,:self.intervention_h_dim])
+        mul_logits_1 = self.multitask_classifier(mul_pooled_output[:,self.intervention_h_dim:self.intervention_h_dim*2])
+        mul_logits_2 = self.multitask_classifier(mul_pooled_output[:,self.intervention_h_dim*2:self.intervention_h_dim*3])
+        mul_logits_3 = self.multitask_classifier(mul_pooled_output[:,self.intervention_h_dim*3:self.intervention_h_dim*4])
 
         loss = None
         if labels is not None:
@@ -1001,7 +1066,7 @@ class IITRobertaForSequenceClassification(RobertaPreTrainedModel):
 
         return SequenceClassifierOutput(
             loss=loss,
-            logits=logits,
+            logits=(logits, mul_logits_0, mul_logits_1, mul_logits_2, mul_logits_3),
             hidden_states=outputs.hidden_states,
             attentions=outputs.attentions,
         )
@@ -1010,19 +1075,62 @@ class InterventionableIITRobertaForSequenceClassification():
     def __init__(
         self,
         model,
+        all_layers=False,
+        multitask=False,
     ):
         self.model = model
+        self.all_layers = all_layers
+        self.multitask = multitask
         
     def forward(
         self,
         base, source,
-        base_intervention_mask,
-        source_intervention_mask,
-        base_labels=None,
-        source_labels=None,
+        base_intervention_corr,
+        source_intervention_corr,
     ):
-        pass
+        (base_input_ids, base_attention_mask) = base
+        base_outputs = self.model(
+            input_ids=base_input_ids,
+            attention_mask=base_attention_mask,
+            output_hidden_states=self.multitask,
+        )
+        (source_input_ids, source_attention_mask) = source
+        source_outputs = self.model(
+            input_ids=source_input_ids,
+            attention_mask=source_attention_mask,
+            output_hidden_states=True,
+        )
+        counterfactual_outputs = self.model(
+            input_ids=base_input_ids,
+            attention_mask=base_attention_mask,
+            # counterfactual arguments
+            source_hidden_states=source_outputs["hidden_states"],
+            base_intervention_corr=base_intervention_corr,
+            source_intervention_corr=source_intervention_corr,
+            all_layers=self.all_layers,
+        )
+        
+        return base_outputs, source_outputs, counterfactual_outputs
     
+class MultiTaskClassificationHead(nn.Module):
+    """Head for sentence-level classification tasks."""
+
+    def __init__(self, config, hidden_size, num_labels):
+        super().__init__()
+        self.dense = nn.Linear(hidden_size, hidden_size)
+        classifier_dropout = (
+            config.classifier_dropout if config.classifier_dropout is not None else config.hidden_dropout_prob
+        )
+        self.dropout = nn.Dropout(classifier_dropout)
+        self.out_proj = nn.Linear(hidden_size, num_labels)
+
+    def forward(self, x):
+        x = self.dropout(x)
+        x = self.dense(x)
+        x = torch.tanh(x)
+        x = self.dropout(x)
+        x = self.out_proj(x)
+        return x
     
 class RobertaClassificationHead(nn.Module):
     """Head for sentence-level classification tasks."""
