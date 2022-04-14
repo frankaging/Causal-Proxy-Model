@@ -18,11 +18,16 @@ from torch.utils.data.distributed import DistributedSampler
 from tqdm import tqdm
 import inspect
 import datasets
+from sklearn.metrics import classification_report
 
 from models.modelings_abstraction import *
 from models.modelings_roberta import *
 
 from utils.optimization import *
+from transformers.optimization import AdamW, Adafactor, get_scheduler
+from transformers.trainer_pt_utils import (
+    get_parameter_names,
+)
 
 import logging
 logging.basicConfig(format='%(asctime)s - %(levelname)s - %(name)s -   %(message)s',
@@ -40,6 +45,9 @@ class ABSAIITTrainer:
         eval_dataset, 
         data_collator,
         device,
+        alpha, beta,
+        wandb_metadata,
+        eval_exclude_neutral=False,
     ):
         self.args = args
         self.train_dataset = train_dataset
@@ -48,8 +56,9 @@ class ABSAIITTrainer:
         self.high_level_model = high_level_model
         self.data_collator = data_collator
         
-        self.alpha = 0.0
-        self.beta = 0.0
+        self.alpha = alpha
+        self.beta = beta
+        self.eval_exclude_neutral = eval_exclude_neutral
         
         # device
         self.device = device
@@ -66,6 +75,18 @@ class ABSAIITTrainer:
         self.n_total_iter = 0
         self.last_log = 0
         self.lr_this_step = 0.0
+        self.n_sequences_epoch = 0
+        self.n_effective_aspect_sequence_epoch = 0
+        self.n_effective_iit_sequence_epoch = 0
+        
+        if "wandb" in self.args.report_to:
+            import wandb
+            run = wandb.init(
+                project=wandb_metadata.split(":")[-1], 
+                entity=wandb_metadata.split(":")[0],
+                name=self.args.run_name,
+            )
+            wandb.config.update(self.args)
         
         if self.args.n_gpu > 1:
             self.train_batch_size = args.per_device_train_batch_size * self.args.n_gpu
@@ -89,26 +110,36 @@ class ABSAIITTrainer:
             logger.info("  Batch size = %d", self.eval_batch_size)
         
         # getting params to optimize early
-        param_optimizer = list(self.low_level_model.model.named_parameters())
-        param_optimizer += list(
-            self.low_level_model.model.named_parameters()
-        )
-        no_decay = ['bias', 'LayerNorm.bias', 'LayerNorm.weight']
+        decay_parameters = get_parameter_names(self.low_level_model.model, [nn.LayerNorm])
+        decay_parameters = [name for name in decay_parameters if "bias" not in name]
         optimizer_grouped_parameters = [
-            {'params': [p for n, p in param_optimizer if not any(nd in n for nd in no_decay)], 'weight_decay': self.args.weight_decay},
-            {'params': [p for n, p in param_optimizer if any(nd in n for nd in no_decay)], 'weight_decay': 0.0}
+            {
+                "params": [p for n, p in self.low_level_model.model.named_parameters() if n in decay_parameters],
+                "weight_decay": self.args.weight_decay,
+            },
+            {
+                "params": [p for n, p in self.low_level_model.model.named_parameters() if n not in decay_parameters],
+                "weight_decay": 0.0,
+            },
         ]
-        if self.args.fp16:
-            assert False
-        else:
-            logger.info('FP16 is not activated, use BertAdam')
-            self.optimizer = BertAdam(
-                optimizer_grouped_parameters,
-                lr=self.args.learning_rate,
-                warmup=self.args.warmup_ratio,
-                t_total=num_train_optimization_steps
-            )
         
+        optimizer_kwargs = {"lr": self.args.learning_rate}
+        adam_kwargs = {
+            "betas": (self.args.adam_beta1, self.args.adam_beta2),
+            "eps": self.args.adam_epsilon,
+        }
+        optimizer_kwargs.update(adam_kwargs)
+        self.optimizer = AdamW(optimizer_grouped_parameters, **optimizer_kwargs)
+        self.lr_scheduler = get_scheduler(
+            self.args.lr_scheduler_type,
+            optimizer=self.optimizer,
+            num_warmup_steps=self.args.get_warmup_steps(num_train_optimization_steps),
+            num_training_steps=num_train_optimization_steps,
+        )
+        self.lr_this_step = self.optimizer.param_groups[0]['lr']
+
+        # last.
+        self.total_loss_epoch = 0
         self.last_loss = 0.0
         self.last_seq_cls_loss = 0.0
         self.last_mul_cls_loss = 0.0
@@ -118,6 +149,33 @@ class ABSAIITTrainer:
         self.last_mul_cls_acc = 1.0/3
         self.last_iit_cls_acc = 1.0/5
         
+        # accumulated.
+        self.accumulated_loss = 0.0
+        self.accumulated_seq_cls_loss = 0.0
+        self.accumulated_mul_cls_loss = 0.0
+        self.accumulated_iit_cls_loss = 0.0
+        
+        self.accumulated_seq_cls_acc = 1.0/5
+        self.accumulated_mul_cls_acc = 1.0/3
+        self.accumulated_iit_cls_acc = 1.0/5
+        
+        # averaged.
+        self.averaged_loss = 0.0
+        self.averaged_seq_cls_loss = 0.0
+        self.averaged_mul_cls_loss = 0.0
+        self.averaged_iit_cls_loss = 0.0
+        
+        self.averaged_seq_cls_acc = 1.0/5
+        self.averaged_mul_cls_acc = 1.0/3
+        self.averaged_iit_cls_acc = 1.0/5
+        
+        # log to a local file
+        log_train = open(os.path.join(self.args.output_dir, 'train_log.txt'), 'w', buffering=1)
+        log_eval = open(os.path.join(self.args.output_dir, 'eval_log.txt'), 'w', buffering=1)
+        print('epoch,global_steps,step,loss,seq_cls_loss,mul_cls_loss,iit_cls_loss,seq_cls_acc,mul_cls_acc,iit_cls_acc', file=log_train)
+        print('epoch,loss,seq_cls_loss,mul_cls_loss,iit_cls_loss,seq_cls_acc,mul_cls_acc,iit_cls_acc', file=log_eval)
+        log_train.close()
+        log_eval.close()
         
     def prepare_batch(
         self,
@@ -140,6 +198,200 @@ class ABSAIITTrainer:
         return input_ids, attention_mask, labels, aspect_labels, \
             source_input_ids, source_attention_mask, source_labels, source_aspect_labels
     
+    def _calculate_metrics(
+        self,
+        actual,
+        pred,
+    ):
+        result = {}
+        if self.eval_exclude_neutral:
+            result_to_print = classification_report(
+                actual, pred, digits=5, output_dict=True, labels=[0,1,3,4])
+            print(classification_report(actual, pred, digits=5, labels=[0,1,3,4]))
+        else:
+            result_to_print = classification_report(
+                actual, pred, digits=5, output_dict=True)
+            print(classification_report(actual, pred, digits=5))
+        result["accuracy"] = result_to_print["accuracy"]
+        result["Macro-F1"] = result_to_print["macro avg"]["f1-score"]
+        result["Weighted-Macro-F1"] = result_to_print["weighted avg"]["f1-score"]
+        return result
+        
+    def evaluate(self):
+        accumulated_loss = 0.0
+        accumulated_seq_cls_loss = 0.0
+        accumulated_mul_cls_loss = 0.0
+        accumulated_iit_cls_loss = 0.0
+        
+        accumulated_seq_cls_acc = 1.0/5
+        accumulated_mul_cls_acc = 1.0/3
+        accumulated_iit_cls_acc = 1.0/5
+        
+        # averaged.
+        averaged_loss = 0.0
+        averaged_seq_cls_loss = 0.0
+        averaged_mul_cls_loss = 0.0
+        averaged_iit_cls_loss = 0.0
+        
+        averaged_seq_cls_acc = 1.0/5
+        averaged_mul_cls_acc = 1.0/3
+        averaged_iit_cls_acc = 1.0/5
+        
+        n_sequences_epoch = 0
+        n_effective_iit_sequence_epoch = 0
+        n_effective_aspect_sequence_epoch = 0
+        
+        # labels saved for evaluation metrics.
+        eval_predicted_labels = []
+        eval_actual_labels = []
+        
+        self.high_level_model.model.eval()
+        self.low_level_model.model.eval()
+        with torch.no_grad():
+            eval_dataloader = self.get_eval_dataloader()
+            iter_bar = tqdm(eval_dataloader, desc="-Iter", disable=False)
+            for batch in iter_bar:
+                input_ids = batch["input_ids"]
+                attention_mask = batch["attention_mask"]
+                labels = batch["labels"]
+                aspect_labels = torch.stack(
+                    [
+                        batch["ambiance_label"], batch["food_label"], 
+                        batch["noise_label"], batch["service_label"]
+                    ], 
+                    dim=-1
+                )
+                
+                base_input_ids, base_attention_mask, \
+                    base_labels, base_aspect_labels, \
+                    source_input_ids, source_attention_mask, \
+                    source_labels, source_aspect_labels = \
+                self.prepare_batch(
+                    *(input_ids, attention_mask, labels, aspect_labels)
+                )
+                
+                base_intervention_mask, source_intervention_mask, \
+                    base_intervention_corr, source_intervention_corr = self._get_interchange_mask(
+                    base_aspect_labels, source_aspect_labels
+                )
+
+                # actual counterfactual labels with the high level model.
+                _, _, counterfactual_labels = self.high_level_model.forward(
+                    base_aspect_labels=base_aspect_labels,
+                    source_aspect_labels=source_aspect_labels,
+                    base_intervention_mask=base_intervention_mask,
+                    source_intervention_mask=source_intervention_mask,
+                )
+                
+                # send all data to gpus.
+                base_labels = base_labels.to(self.device)
+                source_labels = source_labels.to(self.device)
+                counterfactual_labels = counterfactual_labels.to(self.device)
+                base_aspect_labels = base_aspect_labels.to(self.device)
+                source_aspect_labels = source_aspect_labels.to(self.device)
+                base_input_ids = base_input_ids.to(self.device)
+                base_attention_mask = base_attention_mask.to(self.device)
+                source_input_ids = source_input_ids.to(self.device)
+                source_attention_mask = source_attention_mask.to(self.device)
+                base_intervention_corr = base_intervention_corr.to(self.device)
+                source_intervention_corr = source_intervention_corr.to(self.device)
+
+                # predicted counterfactual labels with the low level model.
+                base_outputs, _, counterfactual_outputs = self.low_level_model.forward(
+                    base=(base_input_ids, base_attention_mask),
+                    source=(source_input_ids, source_attention_mask),
+                    base_intervention_corr=base_intervention_corr,
+                    source_intervention_corr=source_intervention_corr,
+                )
+
+                # various losses.
+                seq_cls_loss, seq_cls_acc = self._seq_classification_loss(
+                    base_outputs["logits"][0], base_labels.long()
+                )
+
+                (mul_cls_loss_0, mul_cls_loss_1, mul_cls_loss_2, mul_cls_loss_3), \
+                    (mul_cls_acc_0, mul_cls_acc_1, mul_cls_acc_2, mul_cls_acc_3) = \
+                        self._mul_classification_loss(*base_outputs["logits"][1:], base_aspect_labels.long())
+                mul_cls_loss = (mul_cls_loss_0 + mul_cls_loss_1 + mul_cls_loss_2 + mul_cls_loss_3) / 4.0
+                mul_cls_acc = (mul_cls_acc_0 + mul_cls_acc_1 + mul_cls_acc_2 + mul_cls_acc_3) / 4.0
+
+                iit_cls_loss, iit_cls_acc = self._seq_classification_loss(
+                    counterfactual_outputs["logits"][0], counterfactual_labels.long(), 
+                    base_intervention_corr!=-1
+                )
+
+                loss = seq_cls_loss + self.alpha * mul_cls_loss + self.beta * iit_cls_loss
+                if self.args.n_gpu > 1:
+                    loss = loss.mean()  # mean() to average on multi-gpu.
+
+                # get the accumulated stats for stable perf audits.
+                n_sample = base_input_ids.shape[0]
+                accumulated_loss += loss * n_sample
+                accumulated_seq_cls_loss += seq_cls_loss * n_sample
+                accumulated_mul_cls_loss += mul_cls_loss * int((base_aspect_labels.long()!=-1).sum())
+                accumulated_iit_cls_loss += iit_cls_loss * int((base_intervention_corr!=-1).sum())
+                accumulated_seq_cls_acc += seq_cls_acc * n_sample
+                accumulated_mul_cls_acc += mul_cls_acc * int((base_aspect_labels.long()!=-1).sum())
+                accumulated_iit_cls_acc += iit_cls_acc * int((base_intervention_corr!=-1).sum())
+                n_sequences_epoch += n_sample
+                n_effective_aspect_sequence_epoch += int((base_aspect_labels.long()!=-1).sum())
+                n_effective_iit_sequence_epoch += int((base_intervention_corr!=-1).sum())
+        
+                # save the label for metrics evaluation.
+                _logits = base_outputs["logits"][0]
+                loss_mask = torch.ones(_logits.shape[0]).bool().to(self.device)
+                eval_predicted_labels.extend(_logits[loss_mask].data.max(1)[1].tolist())
+                eval_actual_labels.extend(base_labels.long().tolist())
+
+        # get the averaged stats for stable perf audits.
+        eval_loss = accumulated_loss / n_sequences_epoch
+        eval_seq_cls_loss = accumulated_seq_cls_loss / n_sequences_epoch
+        eval_mul_cls_loss = accumulated_mul_cls_loss / n_effective_aspect_sequence_epoch
+        eval_iit_cls_loss = accumulated_iit_cls_loss / n_effective_iit_sequence_epoch
+        eval_seq_cls_acc = accumulated_seq_cls_acc / n_sequences_epoch
+        eval_mul_cls_acc = accumulated_mul_cls_acc / n_effective_aspect_sequence_epoch
+        eval_iit_cls_acc = accumulated_iit_cls_acc / n_effective_iit_sequence_epoch
+        
+        # metrics.
+        seq_cls_eval_metrics = self._calculate_metrics(
+            eval_actual_labels, eval_predicted_labels
+        )
+        
+        # log eval results.
+        log_eval = open(os.path.join(self.args.output_dir, 'eval_log.txt'), 'a', buffering=1)
+        print('{},{},{},{},{},{},{},{}'.format(
+                self.epoch+1,
+                eval_loss,
+                eval_seq_cls_loss, 
+                eval_mul_cls_loss,
+                eval_iit_cls_loss, 
+                eval_seq_cls_acc,
+                eval_mul_cls_acc,
+                eval_iit_cls_acc,
+            ),
+            file=log_eval
+        )
+        log_eval.close()
+
+        if "wandb" in self.args.report_to:
+            wandb.log(
+                {
+                    "eval/loss": eval_loss, 
+                    "eval/seq_cls_loss": eval_seq_cls_loss, 
+                    "eval/mul_cls_loss": eval_mul_cls_loss, 
+                    "eval/iit_cls_loss": eval_iit_cls_loss, 
+                    "eval/seq_cls_acc": seq_cls_eval_metrics["accuracy"], # using this!
+                    "eval/mul_cls_acc": eval_mul_cls_acc, 
+                    "eval/iit_cls_acc": eval_iit_cls_acc, 
+                    "eval/accuracy" : seq_cls_eval_metrics["accuracy"],
+                    "eval/Macro-F1" : seq_cls_eval_metrics["Macro-F1"],
+                    "eval/Weighted-Macro-F1" : seq_cls_eval_metrics["Weighted-Macro-F1"],
+                    'epoch': self.epoch+1
+                }, 
+            )
+        elif "none" in self.args.report_to:
+            pass
+
     def train(self):
         global_step = 0
         nb_tr_steps = 0
@@ -185,7 +437,7 @@ class ABSAIITTrainer:
             self.end_epoch()
 
         logger.info("Save very last checkpoint as `pytorch_model.bin`.")
-        self.save_checkpoint(checkpoint_name="pytorch_model.bin")
+        self.save_checkpoint()
         logger.info("Training is finished")
     
     def _get_interchange_mask(
@@ -219,7 +471,7 @@ class ABSAIITTrainer:
         loss = loss_fct(logits[loss_mask], labels[loss_mask].view(-1))
         
         pred_cls = logits[loss_mask].data.max(1)[1]
-        correct_count = pred_cls.eq(labels).sum().cpu().item()
+        correct_count = pred_cls.eq(labels[loss_mask]).sum().cpu().item()
         
         return loss, (correct_count/logits.shape[0])*1.0
     
@@ -234,6 +486,43 @@ class ABSAIITTrainer:
         loss_3, acc_3 = self._seq_classification_loss(mul_logits_3, mul_labels[:,3], mul_labels[:,3]!=-1)
         return (loss_0, loss_1, loss_2, loss_3), (acc_0, acc_1, acc_2, acc_3)
     
+    def _record(
+        self, n_sample, n_effective_aspect_sequence, n_effective_iit_sequence,
+        loss, seq_cls_loss, mul_cls_loss, iit_cls_loss,
+        seq_cls_acc, mul_cls_acc, iit_cls_acc,
+    ):
+        self.total_loss_epoch += loss.item()
+        self.last_loss = loss.item()
+        self.last_seq_cls_loss = seq_cls_loss.mean().item() if self.args.n_gpu > 0 else seq_cls_loss.item()
+        self.last_mul_cls_loss = mul_cls_loss.mean().item() if self.args.n_gpu > 0 else mul_cls_loss.item()
+        self.last_iit_cls_loss = iit_cls_loss.mean().item() if self.args.n_gpu > 0 else iit_cls_loss.item()
+        
+        self.last_seq_cls_acc = seq_cls_acc
+        self.last_mul_cls_acc = mul_cls_acc
+        self.last_iit_cls_acc = iit_cls_acc
+        
+        # get the accumulated stats for stable perf audits.
+        self.accumulated_loss += self.last_loss * n_sample
+        self.accumulated_seq_cls_loss += self.last_seq_cls_loss * n_sample
+        self.accumulated_mul_cls_loss += self.last_mul_cls_loss * n_effective_aspect_sequence
+        self.accumulated_iit_cls_loss += self.last_iit_cls_loss * n_effective_iit_sequence
+        self.accumulated_seq_cls_acc += self.last_seq_cls_acc * n_sample
+        self.accumulated_mul_cls_acc +=self.last_mul_cls_acc * n_effective_aspect_sequence
+        self.accumulated_iit_cls_acc += self.last_iit_cls_acc * n_effective_iit_sequence
+        self.n_sequences_epoch += n_sample
+        self.n_effective_aspect_sequence_epoch += n_effective_aspect_sequence
+        self.n_effective_iit_sequence_epoch += n_effective_iit_sequence
+        
+        
+        # get the averaged stats for stable perf audits.
+        self.averaged_loss = self.accumulated_loss / self.n_sequences_epoch
+        self.averaged_seq_cls_loss = self.accumulated_seq_cls_loss / self.n_sequences_epoch
+        self.averaged_mul_cls_loss = self.accumulated_mul_cls_loss / self.n_effective_aspect_sequence_epoch
+        self.averaged_iit_cls_loss = self.accumulated_iit_cls_loss / self.n_effective_iit_sequence_epoch
+        self.averaged_seq_cls_acc = self.accumulated_seq_cls_acc / self.n_sequences_epoch
+        self.averaged_mul_cls_acc = self.accumulated_mul_cls_acc / self.n_effective_aspect_sequence_epoch
+        self.averaged_iit_cls_acc = self.accumulated_iit_cls_acc / self.n_effective_iit_sequence_epoch
+    
     def step(
         self,
         base_input_ids, base_attention_mask, 
@@ -242,8 +531,6 @@ class ABSAIITTrainer:
         source_labels, source_aspect_labels,
         skip_update_iter=False
     ):
-        loss = 0.0
-        
         base_intervention_mask, source_intervention_mask, \
             base_intervention_corr, source_intervention_corr = self._get_interchange_mask(
             base_aspect_labels, source_aspect_labels
@@ -298,15 +585,14 @@ class ABSAIITTrainer:
         loss = seq_cls_loss + self.alpha * mul_cls_loss + self.beta * iit_cls_loss
         if self.args.n_gpu > 1:
             loss = loss.mean()  # mean() to average on multi-gpu.
-            
-        self.last_loss = loss.item()
-        self.last_seq_cls_loss = seq_cls_loss.mean().item() if self.args.n_gpu > 0 else seq_cls_loss.item()
-        self.last_mul_cls_loss = mul_cls_loss.mean().item() if self.args.n_gpu > 0 else mul_cls_loss.item()
-        self.last_iit_cls_loss = iit_cls_loss.mean().item() if self.args.n_gpu > 0 else iit_cls_loss.item()
         
-        self.last_seq_cls_acc = seq_cls_acc.mean().item() if self.args.n_gpu > 0 else seq_cls_acc.item()
-        self.last_mul_cls_acc = mul_cls_acc.mean().item() if self.args.n_gpu > 0 else mul_cls_acc.item()
-        self.last_iit_cls_acc = iit_cls_acc.mean().item() if self.args.n_gpu > 0 else iit_cls_acc.item()
+        self._record(
+            base_input_ids.shape[0], 
+            int((base_aspect_labels.long()!=-1).sum()), 
+            int((base_intervention_corr!=-1).sum()),
+            loss, seq_cls_loss, 
+            mul_cls_loss, iit_cls_loss, seq_cls_acc, mul_cls_acc, iit_cls_acc
+        )
         
         self.optimize(loss, skip_update_iter=skip_update_iter)
     
@@ -318,19 +604,15 @@ class ABSAIITTrainer:
         if self.args.fp16:
             assert False
         else:
-            if loss != 0.0:
-                loss.backward()
+            loss.backward()
         
         if not skip_update_iter:
             self.iter()
 
             if self.n_iter % self.args.gradient_accumulation_steps == 0:
-                if self.args.fp16:
-                    assert False
-                else:
-                    self.lr_this_step = self.optimizer.get_lr()
-
+                self.lr_this_step = self.optimizer.param_groups[0]['lr']
                 self.optimizer.step()
+                self.lr_scheduler.step()
                 self.optimizer.zero_grad()
     
     def iter(self):
@@ -351,17 +633,74 @@ class ABSAIITTrainer:
             self.last_log = time.time()
     
     def log_tensorboard(self):
-        pass
+        
+        log_train = open(os.path.join(self.args.output_dir, 'train_log.txt'), 'a', buffering=1)
+        print('{},{},{},{},{},{},{},{},{},{}'.format(
+                self.epoch+1, self.n_total_iter, self.n_iter, 
+                self.averaged_loss,
+                self.averaged_seq_cls_loss, 
+                self.averaged_mul_cls_loss,
+                self.averaged_iit_cls_loss, 
+                self.averaged_seq_cls_acc,
+                self.averaged_mul_cls_acc,
+                self.averaged_iit_cls_acc
+            ),
+            file=log_train
+        )
+        log_train.close()
+        
+        if "wandb" in self.args.report_to:
+            wandb.log(
+                {
+                    "train/loss": self.averaged_loss, 
+                    "train/seq_cls_loss": self.averaged_seq_cls_loss, 
+                    "train/mul_cls_loss": self.averaged_mul_cls_loss, 
+                    "train/iit_cls_loss": self.averaged_iit_cls_loss, 
+                    "train/seq_cls_acc": self.averaged_seq_cls_acc, 
+                    "train/mul_cls_acc": self.averaged_mul_cls_acc, 
+                    "train/iit_cls_acc": self.averaged_iit_cls_acc, 
+                    
+                    "train/lr": float(self.lr_this_step),
+                    "train/speed": time.time()-self.last_log,
+                }, 
+                step=self.n_total_iter
+            )
+        elif "none" in self.args.report_to:
+            pass
     
     def end_epoch(self):
+        logger.info(f"{self.n_sequences_epoch} sequences have been trained during this epoch.")
+        
+        if self.args.do_eval:
+            self.evaluate()
+
         self.epoch += 1
         self.n_sequences_epoch = 0
         self.n_iter = 0
         self.total_loss_epoch = 0
+        self.n_effective_aspect_sequence_epoch = 0
+        self.n_effective_iit_sequence_epoch = 0
+        
+        self.total_loss_epoch = 0
+        self.accumulated_loss = 0.0
+        self.accumulated_seq_cls_loss = 0.0
+        self.accumulated_mul_cls_loss = 0.0
+        self.accumulated_iit_cls_loss = 0.0
+        
+        self.accumulated_seq_cls_acc = 1.0/5
+        self.accumulated_mul_cls_acc = 1.0/3
+        self.accumulated_iit_cls_acc = 1.0/5
     
-    def save_checkpoint(self, checkpoint_name=None):
-        pass
-    
+    def save_checkpoint(self):
+        try:
+            self.low_level_model.model.save_pretrained(
+                self.args.output_dir,
+            )
+        except:
+            self.low_level_model.model.module.save_pretrained(
+                self.args.output_dir,
+            )
+            
     def _remove_unused_columns(self, dataset, description: Optional[str] = None):
         if not self.args.remove_unused_columns:
             return dataset
@@ -420,7 +759,7 @@ class ABSAIITTrainer:
         Subclass and override this method if you want to inject some custom behavior.
         """
         if self.eval_dataset is None:
-            raise ValueError("Trainer: training requires a train_dataset.")
+            raise ValueError("Trainer: eval requires a eval_dataset.")
 
         eval_dataset = self.eval_dataset
         eval_dataset = self._remove_unused_columns(eval_dataset, description="evaluation")

@@ -1,3 +1,5 @@
+training_result/
+wandb/
 datasets/*
 *cache/
 playground.ipynb

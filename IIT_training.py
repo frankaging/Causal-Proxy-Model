@@ -69,7 +69,7 @@ class DataTrainingArguments:
         metadata={"help": "The name of split this is trained on."},
     )
     eval_split_name: Optional[str] = field(
-        default=None,
+        default="validation",
         metadata={"help": "The name of split this is evaluated with."},
     )  
     dataset_name: Optional[str] = field(
@@ -124,10 +124,7 @@ class DataTrainingArguments:
     )
     test_file: Optional[str] = field(default=None, metadata={
                                      "help": "A csv or a json file containing the test data."})
-    eval_exclude_neutral: bool = field(
-        default=False, metadata={"help": "Whether to exclude the neutral class for eval metrics."}
-    )
-        
+ 
     def __post_init__(self):
         if self.task_name is not None:
             self.task_name = self.task_name.lower()
@@ -193,6 +190,32 @@ class ModelArguments:
         metadata={
             "help": "Device"}
     ) 
+        
+    alpha: float = field(
+        default=0.0,
+        metadata={
+            "help": "Loss coefficient for the multitask objective."}
+    )
+        
+    beta: float = field(
+        default=0.0,
+        metadata={
+            "help": "Loss coefficient for the IIT objective."}
+    )
+        
+    wandb_metadata: str = field(
+        default="go:IIT-ABSA",
+        metadata={
+            "help": "[username]:[project_name]"},
+    )
+        
+    eval_exclude_neutral: bool = field(
+        default=False,
+        metadata={
+            "help": "Whether to exclude neutral class when evaluating."}
+    ) 
+        
+        
 
 
 # In[ ]:
@@ -235,19 +258,21 @@ def main():
     # overwrite the output dir a little bit.
     data_dir_postfix = data_args.dataset_name.strip("/").split("/")[-1]
     if training_args.do_train:
-        if data_args.train_split_name:
-            sub_output_dir = f"{data_args.task_name}.train.{data_args.train_split_name}.{data_dir_postfix}"
-        else:
-            sub_output_dir = f"{data_args.task_name}.{data_dir_postfix}"
-    if training_args.do_eval:
-        if data_args.eval_split_name is not None:
-            sub_output_dir = f"{data_args.task_name}.eval.{data_args.eval_split_name}.{data_dir_postfix}"
-        else:
-            sub_output_dir = f"{data_args.task_name}.{data_dir_postfix}"
+        sub_output_dir = f"{data_args.task_name}.train.{data_args.train_split_name}.alpha.{model_args.alpha}.beta.{model_args.beta}.{data_dir_postfix}"
+    elif training_args.do_eval:
+        sub_output_dir = f"{model_args.model_name_or_path}.eval.{data_args.eval_split_name}.{data_dir_postfix}"
     if training_args.do_train:
         sub_output_dir = f"{sub_output_dir}_seed_{training_args.seed}"
+        
     training_args.output_dir = os.path.join(
         training_args.output_dir, sub_output_dir)
+    # let us explicity create the directory.
+    is_output_dir_exist = os.path.exists(training_args.output_dir)
+    if not is_output_dir_exist:
+        # Create a new directory because it does not exist 
+        os.makedirs(training_args.output_dir)
+        print("The new output directory is created!")
+    
     # TODO: add split type for multi/iit?
     training_args.run_name = sub_output_dir
     logger.info(f"WANDB RUN NAME: {training_args.run_name}")
@@ -454,9 +479,13 @@ def main():
         eval_dataset=eval_dataset if training_args.do_eval else None,
         data_collator=data_collator,
         device=device,
+        alpha=model_args.alpha,
+        beta=model_args.beta,
+        wandb_metadata=model_args.wandb_metadata,
+        eval_exclude_neutral=model_args.eval_exclude_neutral,
     )
     
-    logger.info("Hey Zen: Let's go get some drinks.")
+    logger.info("Hey Zen: Life is sad? Let's go get some drinks.")
     trainer.train()
     
 
