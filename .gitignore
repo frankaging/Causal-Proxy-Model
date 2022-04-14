@@ -1,3 +1,4 @@
+evaluation_result/
 training_result/
 wandb/
 datasets/*

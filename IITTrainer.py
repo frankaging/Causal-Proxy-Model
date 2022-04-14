@@ -109,34 +109,35 @@ class ABSAIITTrainer:
             logger.info("  Num examples = %d", len(eval_dataset))
             logger.info("  Batch size = %d", self.eval_batch_size)
         
-        # getting params to optimize early
-        decay_parameters = get_parameter_names(self.low_level_model.model, [nn.LayerNorm])
-        decay_parameters = [name for name in decay_parameters if "bias" not in name]
-        optimizer_grouped_parameters = [
-            {
-                "params": [p for n, p in self.low_level_model.model.named_parameters() if n in decay_parameters],
-                "weight_decay": self.args.weight_decay,
-            },
-            {
-                "params": [p for n, p in self.low_level_model.model.named_parameters() if n not in decay_parameters],
-                "weight_decay": 0.0,
-            },
-        ]
-        
-        optimizer_kwargs = {"lr": self.args.learning_rate}
-        adam_kwargs = {
-            "betas": (self.args.adam_beta1, self.args.adam_beta2),
-            "eps": self.args.adam_epsilon,
-        }
-        optimizer_kwargs.update(adam_kwargs)
-        self.optimizer = AdamW(optimizer_grouped_parameters, **optimizer_kwargs)
-        self.lr_scheduler = get_scheduler(
-            self.args.lr_scheduler_type,
-            optimizer=self.optimizer,
-            num_warmup_steps=self.args.get_warmup_steps(num_train_optimization_steps),
-            num_training_steps=num_train_optimization_steps,
-        )
-        self.lr_this_step = self.optimizer.param_groups[0]['lr']
+        if self.args.do_train:
+            # getting params to optimize early
+            decay_parameters = get_parameter_names(self.low_level_model.model, [nn.LayerNorm])
+            decay_parameters = [name for name in decay_parameters if "bias" not in name]
+            optimizer_grouped_parameters = [
+                {
+                    "params": [p for n, p in self.low_level_model.model.named_parameters() if n in decay_parameters],
+                    "weight_decay": self.args.weight_decay,
+                },
+                {
+                    "params": [p for n, p in self.low_level_model.model.named_parameters() if n not in decay_parameters],
+                    "weight_decay": 0.0,
+                },
+            ]
+
+            optimizer_kwargs = {"lr": self.args.learning_rate}
+            adam_kwargs = {
+                "betas": (self.args.adam_beta1, self.args.adam_beta2),
+                "eps": self.args.adam_epsilon,
+            }
+            optimizer_kwargs.update(adam_kwargs)
+            self.optimizer = AdamW(optimizer_grouped_parameters, **optimizer_kwargs)
+            self.lr_scheduler = get_scheduler(
+                self.args.lr_scheduler_type,
+                optimizer=self.optimizer,
+                num_warmup_steps=self.args.get_warmup_steps(num_train_optimization_steps),
+                num_training_steps=num_train_optimization_steps,
+            )
+            self.lr_this_step = self.optimizer.param_groups[0]['lr']
 
         # last.
         self.total_loss_epoch = 0

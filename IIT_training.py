@@ -260,7 +260,8 @@ def main():
     if training_args.do_train:
         sub_output_dir = f"{data_args.task_name}.train.{data_args.train_split_name}.alpha.{model_args.alpha}.beta.{model_args.beta}.{data_dir_postfix}"
     elif training_args.do_eval:
-        sub_output_dir = f"{model_args.model_name_or_path}.eval.{data_args.eval_split_name}.{data_dir_postfix}"
+        train_dir = model_args.model_name_or_path.strip("/").split("/")[-1]
+        sub_output_dir = f"{train_dir}.eval.{data_args.eval_split_name}.{data_dir_postfix}"
     if training_args.do_train:
         sub_output_dir = f"{sub_output_dir}_seed_{training_args.seed}"
         
@@ -485,8 +486,13 @@ def main():
         eval_exclude_neutral=model_args.eval_exclude_neutral,
     )
     
-    logger.info("Hey Zen: Life is sad? Let's go get some drinks.")
-    trainer.train()
+    if training_args.do_train:
+        logger.info("Hey Zen: Life is sad? Let's go get some drinks.")
+        trainer.train()
+    
+    if training_args.do_eval:
+        logger.info("Hey Zen: Life is sad? Let's go get some drinks.")
+        trainer.evaluate()
     
 
 
