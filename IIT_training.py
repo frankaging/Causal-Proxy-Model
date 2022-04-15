@@ -215,6 +215,11 @@ class ModelArguments:
             "help": "Whether to exclude neutral class when evaluating."}
     ) 
         
+    intervention_h_dim: int = field(
+        default=100,
+        metadata={
+            "help": "Hidden dimension size to interchange per aspect."}
+    )
         
 
 
@@ -258,7 +263,7 @@ def main():
     # overwrite the output dir a little bit.
     data_dir_postfix = data_args.dataset_name.strip("/").split("/")[-1]
     if training_args.do_train:
-        sub_output_dir = f"{data_args.task_name}.train.{data_args.train_split_name}.alpha.{model_args.alpha}.beta.{model_args.beta}.{data_dir_postfix}"
+        sub_output_dir = f"{data_args.task_name}.train.{data_args.train_split_name}.alpha.{model_args.alpha}.beta.{model_args.beta}.dim.{model_args.intervention_h_dim}.{data_dir_postfix}"
     elif training_args.do_eval:
         train_dir = model_args.model_name_or_path.strip("/").split("/")[-1]
         sub_output_dir = f"{train_dir}.eval.{data_args.eval_split_name}.{data_dir_postfix}"
@@ -330,7 +335,12 @@ def main():
         revision=model_args.model_revision,
         use_auth_token=True if model_args.use_auth_token else None,
     )
-    
+    config.intervention_h_dim = model_args.intervention_h_dim
+    assert config.intervention_h_dim*4 <= config.hidden_size
+    logger.warning(
+        f"Hey, per aspect this is the size you are interchange with: {config.intervention_h_dim}"
+    )
+        
     tokenizer = AutoTokenizer.from_pretrained(
         model_args.tokenizer_name if model_args.tokenizer_name else model_args.model_name_or_path,
         cache_dir=model_args.cache_dir,
@@ -491,7 +501,6 @@ def main():
         trainer.train()
     
     if training_args.do_eval:
-        logger.info("Hey Zen: Life is sad? Let's go get some drinks.")
         trainer.evaluate()
     
 

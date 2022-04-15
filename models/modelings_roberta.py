@@ -596,12 +596,12 @@ class RobertaLayer(nn.Module):
 
 # Copied from transformers.models.bert.modeling_bert.BertEncoder with Bert->Roberta
 class RobertaEncoder(nn.Module):
-    def __init__(self, config, intervention_h_dim):
+    def __init__(self, config):
         super().__init__()
         self.config = config
         self.layer = nn.ModuleList([RobertaLayer(config) for _ in range(config.num_hidden_layers)])
         self.gradient_checkpointing = False
-        self.intervention_h_dim = intervention_h_dim
+        self.intervention_h_dim = config.intervention_h_dim
         
     def forward(
         self,
@@ -793,12 +793,12 @@ class RobertaModel(RobertaPreTrainedModel):
     _keys_to_ignore_on_load_missing = [r"position_ids"]
 
     # Copied from transformers.models.bert.modeling_bert.BertModel.__init__ with Bert->Roberta
-    def __init__(self, config, intervention_h_dim, add_pooling_layer=True):
+    def __init__(self, config, add_pooling_layer=True):
         super().__init__(config)
         self.config = config
 
         self.embeddings = RobertaEmbeddings(config)
-        self.encoder = RobertaEncoder(config, intervention_h_dim)
+        self.encoder = RobertaEncoder(config)
 
         self.pooler = RobertaPooler(config) if add_pooling_layer else None
 
@@ -966,7 +966,6 @@ class IITRobertaForSequenceClassification(RobertaPreTrainedModel):
 
     def __init__(
         self, config,
-        intervention_h_dim=100,
         num_aspect_labels=3,
     ):
         super().__init__(config)
@@ -974,13 +973,13 @@ class IITRobertaForSequenceClassification(RobertaPreTrainedModel):
         self.config = config
 
         self.roberta = RobertaModel(
-            config, intervention_h_dim, add_pooling_layer=False
+            config, add_pooling_layer=False
         )
         self.classifier = RobertaClassificationHead(config)
         self.multitask_classifier = MultiTaskClassificationHead(
-            config, intervention_h_dim, num_aspect_labels
+            config, num_aspect_labels
         )
-        self.intervention_h_dim = intervention_h_dim
+        self.intervention_h_dim = config.intervention_h_dim
         # Initialize weights and apply final processing
         self.post_init()
 
@@ -1115,8 +1114,9 @@ class InterventionableIITRobertaForSequenceClassification():
 class MultiTaskClassificationHead(nn.Module):
     """Head for sentence-level classification tasks."""
 
-    def __init__(self, config, hidden_size, num_labels):
+    def __init__(self, config, num_labels):
         super().__init__()
+        hidden_size = config.intervention_h_dim
         self.dense = nn.Linear(hidden_size, hidden_size)
         classifier_dropout = (
             config.classifier_dropout if config.classifier_dropout is not None else config.hidden_dropout_prob

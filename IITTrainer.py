@@ -150,15 +150,17 @@ class ABSAIITTrainer:
         self.last_mul_cls_acc = 1.0/3
         self.last_iit_cls_acc = 1.0/5
         
+        self.last_effective_intervention = 0.0
+        
         # accumulated.
         self.accumulated_loss = 0.0
         self.accumulated_seq_cls_loss = 0.0
         self.accumulated_mul_cls_loss = 0.0
         self.accumulated_iit_cls_loss = 0.0
         
-        self.accumulated_seq_cls_acc = 1.0/5
-        self.accumulated_mul_cls_acc = 1.0/3
-        self.accumulated_iit_cls_acc = 1.0/5
+        self.accumulated_seq_cls_count = 0
+        self.accumulated_mul_cls_count = 0
+        self.accumulated_iit_cls_count = 0
         
         # averaged.
         self.averaged_loss = 0.0
@@ -224,9 +226,9 @@ class ABSAIITTrainer:
         accumulated_mul_cls_loss = 0.0
         accumulated_iit_cls_loss = 0.0
         
-        accumulated_seq_cls_acc = 1.0/5
-        accumulated_mul_cls_acc = 1.0/3
-        accumulated_iit_cls_acc = 1.0/5
+        accumulated_seq_cls_count = 0
+        accumulated_mul_cls_count = 0
+        accumulated_iit_cls_count = 0
         
         # averaged.
         averaged_loss = 0.0
@@ -306,17 +308,14 @@ class ABSAIITTrainer:
                 )
 
                 # various losses.
-                seq_cls_loss, seq_cls_acc = self._seq_classification_loss(
+                seq_cls_loss, seq_cls_count = self._seq_classification_loss(
                     base_outputs["logits"][0], base_labels.long()
                 )
 
-                (mul_cls_loss_0, mul_cls_loss_1, mul_cls_loss_2, mul_cls_loss_3), \
-                    (mul_cls_acc_0, mul_cls_acc_1, mul_cls_acc_2, mul_cls_acc_3) = \
+                mul_cls_loss, mul_cls_count = \
                         self._mul_classification_loss(*base_outputs["logits"][1:], base_aspect_labels.long())
-                mul_cls_loss = (mul_cls_loss_0 + mul_cls_loss_1 + mul_cls_loss_2 + mul_cls_loss_3) / 4.0
-                mul_cls_acc = (mul_cls_acc_0 + mul_cls_acc_1 + mul_cls_acc_2 + mul_cls_acc_3) / 4.0
 
-                iit_cls_loss, iit_cls_acc = self._seq_classification_loss(
+                iit_cls_loss, iit_cls_count = self._seq_classification_loss(
                     counterfactual_outputs["logits"][0], counterfactual_labels.long(), 
                     base_intervention_corr!=-1
                 )
@@ -331,9 +330,10 @@ class ABSAIITTrainer:
                 accumulated_seq_cls_loss += seq_cls_loss * n_sample
                 accumulated_mul_cls_loss += mul_cls_loss * int((base_aspect_labels.long()!=-1).sum())
                 accumulated_iit_cls_loss += iit_cls_loss * int((base_intervention_corr!=-1).sum())
-                accumulated_seq_cls_acc += seq_cls_acc * n_sample
-                accumulated_mul_cls_acc += mul_cls_acc * int((base_aspect_labels.long()!=-1).sum())
-                accumulated_iit_cls_acc += iit_cls_acc * int((base_intervention_corr!=-1).sum())
+                
+                accumulated_seq_cls_count += seq_cls_count
+                accumulated_mul_cls_count += mul_cls_count
+                accumulated_iit_cls_count += iit_cls_count
                 n_sequences_epoch += n_sample
                 n_effective_aspect_sequence_epoch += int((base_aspect_labels.long()!=-1).sum())
                 n_effective_iit_sequence_epoch += int((base_intervention_corr!=-1).sum())
@@ -349,9 +349,9 @@ class ABSAIITTrainer:
         eval_seq_cls_loss = accumulated_seq_cls_loss / n_sequences_epoch
         eval_mul_cls_loss = accumulated_mul_cls_loss / n_effective_aspect_sequence_epoch
         eval_iit_cls_loss = accumulated_iit_cls_loss / n_effective_iit_sequence_epoch
-        eval_seq_cls_acc = accumulated_seq_cls_acc / n_sequences_epoch
-        eval_mul_cls_acc = accumulated_mul_cls_acc / n_effective_aspect_sequence_epoch
-        eval_iit_cls_acc = accumulated_iit_cls_acc / n_effective_iit_sequence_epoch
+        eval_seq_cls_acc = accumulated_seq_cls_count / n_sequences_epoch
+        eval_mul_cls_acc = accumulated_mul_cls_count / n_effective_aspect_sequence_epoch
+        eval_iit_cls_acc = accumulated_iit_cls_count / n_effective_iit_sequence_epoch
         
         # metrics.
         seq_cls_eval_metrics = self._calculate_metrics(
@@ -474,23 +474,28 @@ class ABSAIITTrainer:
         pred_cls = logits[loss_mask].data.max(1)[1]
         correct_count = pred_cls.eq(labels[loss_mask]).sum().cpu().item()
         
-        return loss, (correct_count/logits.shape[0])*1.0
+        return loss, correct_count # return the correct count, let the outter loop to determine the rest!
     
     def _mul_classification_loss(
         self,
         mul_logits_0, mul_logits_1, mul_logits_2, mul_logits_3,
         mul_labels,
     ):
-        loss_0, acc_0 = self._seq_classification_loss(mul_logits_0, mul_labels[:,0], mul_labels[:,0]!=-1)
-        loss_1, acc_1 = self._seq_classification_loss(mul_logits_1, mul_labels[:,1], mul_labels[:,1]!=-1)
-        loss_2, acc_2 = self._seq_classification_loss(mul_logits_2, mul_labels[:,2], mul_labels[:,2]!=-1)
-        loss_3, acc_3 = self._seq_classification_loss(mul_logits_3, mul_labels[:,3], mul_labels[:,3]!=-1)
-        return (loss_0, loss_1, loss_2, loss_3), (acc_0, acc_1, acc_2, acc_3)
+        loss_0, count_0 = self._seq_classification_loss(mul_logits_0, mul_labels[:,0], mul_labels[:,0]!=-1)
+        loss_1, count_1 = self._seq_classification_loss(mul_logits_1, mul_labels[:,1], mul_labels[:,1]!=-1)
+        loss_2, count_2 = self._seq_classification_loss(mul_logits_2, mul_labels[:,2], mul_labels[:,2]!=-1)
+        loss_3, count_3 = self._seq_classification_loss(mul_logits_3, mul_labels[:,3], mul_labels[:,3]!=-1)
+        mul_count = count_0+count_1+count_2+count_3
+        w_0 = count_0*1.0/mul_count
+        w_1 = count_1*1.0/mul_count
+        w_2 = count_2*1.0/mul_count
+        w_3 = count_3*1.0/mul_count
+        return w_0*loss_0+w_1*loss_1+w_2*loss_2+w_3*loss_3, mul_count
     
     def _record(
         self, n_sample, n_effective_aspect_sequence, n_effective_iit_sequence,
         loss, seq_cls_loss, mul_cls_loss, iit_cls_loss,
-        seq_cls_acc, mul_cls_acc, iit_cls_acc,
+        seq_cls_count, mul_cls_count, iit_cls_count
     ):
         self.total_loss_epoch += loss.item()
         self.last_loss = loss.item()
@@ -498,31 +503,35 @@ class ABSAIITTrainer:
         self.last_mul_cls_loss = mul_cls_loss.mean().item() if self.args.n_gpu > 0 else mul_cls_loss.item()
         self.last_iit_cls_loss = iit_cls_loss.mean().item() if self.args.n_gpu > 0 else iit_cls_loss.item()
         
-        self.last_seq_cls_acc = seq_cls_acc
-        self.last_mul_cls_acc = mul_cls_acc
-        self.last_iit_cls_acc = iit_cls_acc
+        self.last_seq_cls_acc = seq_cls_count*1.0/n_sample
+        self.last_mul_cls_acc = mul_cls_count*1.0/n_effective_aspect_sequence
+        self.last_iit_cls_acc = iit_cls_count*1.0/n_effective_iit_sequence
+        
+        self.last_effective_intervention = n_effective_iit_sequence*1.0/n_sample
         
         # get the accumulated stats for stable perf audits.
         self.accumulated_loss += self.last_loss * n_sample
+        
         self.accumulated_seq_cls_loss += self.last_seq_cls_loss * n_sample
         self.accumulated_mul_cls_loss += self.last_mul_cls_loss * n_effective_aspect_sequence
         self.accumulated_iit_cls_loss += self.last_iit_cls_loss * n_effective_iit_sequence
-        self.accumulated_seq_cls_acc += self.last_seq_cls_acc * n_sample
-        self.accumulated_mul_cls_acc +=self.last_mul_cls_acc * n_effective_aspect_sequence
-        self.accumulated_iit_cls_acc += self.last_iit_cls_acc * n_effective_iit_sequence
+        
+        self.accumulated_seq_cls_count += seq_cls_count
+        self.accumulated_mul_cls_count += mul_cls_count
+        self.accumulated_iit_cls_count += iit_cls_count
+        
         self.n_sequences_epoch += n_sample
         self.n_effective_aspect_sequence_epoch += n_effective_aspect_sequence
         self.n_effective_iit_sequence_epoch += n_effective_iit_sequence
-        
         
         # get the averaged stats for stable perf audits.
         self.averaged_loss = self.accumulated_loss / self.n_sequences_epoch
         self.averaged_seq_cls_loss = self.accumulated_seq_cls_loss / self.n_sequences_epoch
         self.averaged_mul_cls_loss = self.accumulated_mul_cls_loss / self.n_effective_aspect_sequence_epoch
         self.averaged_iit_cls_loss = self.accumulated_iit_cls_loss / self.n_effective_iit_sequence_epoch
-        self.averaged_seq_cls_acc = self.accumulated_seq_cls_acc / self.n_sequences_epoch
-        self.averaged_mul_cls_acc = self.accumulated_mul_cls_acc / self.n_effective_aspect_sequence_epoch
-        self.averaged_iit_cls_acc = self.accumulated_iit_cls_acc / self.n_effective_iit_sequence_epoch
+        self.averaged_seq_cls_acc = self.accumulated_seq_cls_count / self.n_sequences_epoch
+        self.averaged_mul_cls_acc = self.accumulated_mul_cls_count / self.n_effective_aspect_sequence_epoch
+        self.averaged_iit_cls_acc = self.accumulated_iit_cls_count / self.n_effective_iit_sequence_epoch
     
     def step(
         self,
@@ -568,21 +577,15 @@ class ABSAIITTrainer:
         )
         
         # various losses.
-        seq_cls_loss, seq_cls_acc = self._seq_classification_loss(
+        seq_cls_loss, seq_cls_count = self._seq_classification_loss(
             base_outputs["logits"][0], base_labels.long()
         )
-        
-        (mul_cls_loss_0, mul_cls_loss_1, mul_cls_loss_2, mul_cls_loss_3), \
-            (mul_cls_acc_0, mul_cls_acc_1, mul_cls_acc_2, mul_cls_acc_3) = \
+        mul_cls_loss, mul_cls_count = \
                 self._mul_classification_loss(*base_outputs["logits"][1:], base_aspect_labels.long())
-        mul_cls_loss = (mul_cls_loss_0 + mul_cls_loss_1 + mul_cls_loss_2 + mul_cls_loss_3) / 4.0
-        mul_cls_acc = (mul_cls_acc_0 + mul_cls_acc_1 + mul_cls_acc_2 + mul_cls_acc_3) / 4.0
-        
-        iit_cls_loss, iit_cls_acc = self._seq_classification_loss(
+        iit_cls_loss, iit_cls_count = self._seq_classification_loss(
             counterfactual_outputs["logits"][0], counterfactual_labels.long(), 
             base_intervention_corr!=-1
         )
-        
         loss = seq_cls_loss + self.alpha * mul_cls_loss + self.beta * iit_cls_loss
         if self.args.n_gpu > 1:
             loss = loss.mean()  # mean() to average on multi-gpu.
@@ -591,8 +594,8 @@ class ABSAIITTrainer:
             base_input_ids.shape[0], 
             int((base_aspect_labels.long()!=-1).sum()), 
             int((base_intervention_corr!=-1).sum()),
-            loss, seq_cls_loss, 
-            mul_cls_loss, iit_cls_loss, seq_cls_acc, mul_cls_acc, iit_cls_acc
+            loss, seq_cls_loss, mul_cls_loss, iit_cls_loss, 
+            seq_cls_count, mul_cls_count, iit_cls_count
         )
         
         self.optimize(loss, skip_update_iter=skip_update_iter)
@@ -663,6 +666,8 @@ class ABSAIITTrainer:
                     
                     "train/lr": float(self.lr_this_step),
                     "train/speed": time.time()-self.last_log,
+                    
+                    "train/effective_intervention": self.last_effective_intervention,
                 }, 
                 step=self.n_total_iter
             )
@@ -688,9 +693,9 @@ class ABSAIITTrainer:
         self.accumulated_mul_cls_loss = 0.0
         self.accumulated_iit_cls_loss = 0.0
         
-        self.accumulated_seq_cls_acc = 1.0/5
-        self.accumulated_mul_cls_acc = 1.0/3
-        self.accumulated_iit_cls_acc = 1.0/5
+        self.accumulated_seq_cls_count = 0
+        self.accumulated_mul_cls_count = 0
+        self.accumulated_iit_cls_count = 0
     
     def save_checkpoint(self):
         try:
