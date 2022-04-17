@@ -221,6 +221,12 @@ class ModelArguments:
             "help": "Hidden dimension size to interchange per aspect."}
     )
         
+    high_level_model_type: str = field(
+        default="logistic_regression",
+        metadata={
+            "help": "How the high level model infer the correct label."}
+    )
+        
 
 
 # In[ ]:
@@ -263,7 +269,7 @@ def main():
     # overwrite the output dir a little bit.
     data_dir_postfix = data_args.dataset_name.strip("/").split("/")[-1]
     if training_args.do_train:
-        sub_output_dir = f"{data_args.task_name}.train.{data_args.train_split_name}.alpha.{model_args.alpha}.beta.{model_args.beta}.dim.{model_args.intervention_h_dim}.{data_dir_postfix}"
+        sub_output_dir = f"{data_args.task_name}.train.{data_args.train_split_name}"                         f".alpha.{model_args.alpha}.beta.{model_args.beta}"                         f".dim.{model_args.intervention_h_dim}"                         f".hightype.{model_args.high_level_model_type}.{data_dir_postfix}"
     elif training_args.do_eval:
         train_dir = model_args.model_name_or_path.strip("/").split("/")[-1]
         sub_output_dir = f"{train_dir}.eval.{data_args.eval_split_name}.{data_dir_postfix}"
@@ -478,7 +484,9 @@ def main():
         model=model
     )
     high_level_model = InterventionableAbstractionModelForABSA(
-        model=AbstractionModelForABSA()
+        model=AbstractionModelForABSA(
+            model_type=model_args.high_level_model_type,
+        ),
     )
     
     # Initialize our Trainer
@@ -494,6 +502,7 @@ def main():
         beta=model_args.beta,
         wandb_metadata=model_args.wandb_metadata,
         eval_exclude_neutral=model_args.eval_exclude_neutral,
+        high_level_model_type=model_args.high_level_model_type,
     )
     
     if training_args.do_train:
