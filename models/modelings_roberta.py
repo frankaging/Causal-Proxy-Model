@@ -676,24 +676,15 @@ class RobertaEncoder(nn.Module):
                 if self.config.add_cross_attention:
                     all_cross_attentions = all_cross_attentions + (layer_outputs[2],)
                     
-            # INT_POINT_1
-            if all_layers and source_hidden_states:
+            # INT_POINT: only the last layer!
+            if source_hidden_states and i == self.config.num_hidden_layers-1:
                 for b in range(0, hidden_states.shape[0]):
                     if base_intervention_corr[b] != -1:
                         start_idx = base_intervention_corr[b]*self.intervention_h_dim
                         end_idx = (base_intervention_corr[b]+1)*self.intervention_h_dim
                         hidden_states[b][0][start_idx:end_idx] = \
                             source_hidden_states[i+1][b][0][start_idx:end_idx]
-            
-        # INT_POINT_2
-        if not all_layers and source_hidden_states:
-            for b in range(0, hidden_states.shape[0]):
-                if base_intervention_corr[b] != -1:
-                    start_idx = base_intervention_corr[b]*self.intervention_h_dim
-                    end_idx = (base_intervention_corr[b]+1)*self.intervention_h_dim
-                    hidden_states[b][0][start_idx:end_idx] = \
-                        source_hidden_states[-1][b][0][start_idx:end_idx]
-        
+                        
         if output_hidden_states:
             all_hidden_states = all_hidden_states + (hidden_states,)
 
@@ -1031,11 +1022,12 @@ class IITRobertaForSequenceClassification(RobertaPreTrainedModel):
         logits = self.classifier(sequence_output)
         
         mul_pooled_output = sequence_output[:,0,:]
+        
         mul_logits_0 = self.multitask_classifier(mul_pooled_output[:,:self.intervention_h_dim])
         mul_logits_1 = self.multitask_classifier(mul_pooled_output[:,self.intervention_h_dim:self.intervention_h_dim*2])
         mul_logits_2 = self.multitask_classifier(mul_pooled_output[:,self.intervention_h_dim*2:self.intervention_h_dim*3])
         mul_logits_3 = self.multitask_classifier(mul_pooled_output[:,self.intervention_h_dim*3:self.intervention_h_dim*4])
-
+        
         loss = None
         if labels is not None:
             if self.config.problem_type is None:

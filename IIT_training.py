@@ -214,7 +214,7 @@ class ModelArguments:
         metadata={
             "help": "Whether to exclude neutral class when evaluating."}
     ) 
-        
+ 
     intervention_h_dim: int = field(
         default=100,
         metadata={
@@ -226,7 +226,12 @@ class ModelArguments:
         metadata={
             "help": "How the high level model infer the correct label."}
     )
-        
+      
+    all_layers: bool = field(
+        default=False,
+        metadata={
+            "help": "Whether to performance interchange intervention at all layers."}
+    ) 
 
 
 # In[ ]:
@@ -481,7 +486,8 @@ def main():
         data_collator = None
     
     low_level_model = InterventionableIITRobertaForSequenceClassification(
-        model=model
+        model=model,
+        all_layers=model_args.all_layers
     )
     high_level_model = InterventionableAbstractionModelForABSA(
         model=AbstractionModelForABSA(

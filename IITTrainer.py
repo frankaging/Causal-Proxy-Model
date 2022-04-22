@@ -165,6 +165,10 @@ class ABSAIITTrainer:
         self.last_iit_cls_acc = 1.0/5
         
         self.last_effective_intervention = 0.0
+        self.last_low_label_shifts_count = 0.0
+        self.last_high_label_shifts_count = 0.0
+        self.last_low_cos_sim = 0.0
+        self.last_base_source_label_shifts_count = 0.0
         
         # accumulated.
         self.accumulated_loss = 0.0
@@ -512,8 +516,11 @@ class ABSAIITTrainer:
         labels,
         loss_mask=None,
     ):
+        
+        
         loss_mask = torch.ones(logits.shape[0]).bool().to(self.device) if loss_mask == None else loss_mask
         loss_fct = CrossEntropyLoss()
+        
         loss = loss_fct(logits[loss_mask], labels[loss_mask].view(-1))
         
         pred_cls = logits[loss_mask].data.max(1)[1]
@@ -541,6 +548,8 @@ class ABSAIITTrainer:
         self, n_sample, n_effective_aspect_sequence, n_effective_iit_sequence,
         loss, seq_cls_loss, mul_cls_loss, iit_cls_loss,
         seq_cls_count, mul_cls_count, iit_cls_count, abstract_cls_count,
+        low_label_shifts_count, high_label_shifts_count, low_cos_sim,
+        base_source_label_shifts_count
     ):
         self.total_loss_epoch += loss.item()
         self.last_loss = loss.item()
@@ -553,6 +562,10 @@ class ABSAIITTrainer:
         self.last_iit_cls_acc = iit_cls_count*1.0/n_effective_iit_sequence
         
         self.last_effective_intervention = n_effective_iit_sequence*1.0/n_sample
+        self.last_low_label_shifts_count = low_label_shifts_count*1.0/n_sample
+        self.last_high_label_shifts_count = high_label_shifts_count*1.0/n_sample
+        self.last_low_cos_sim = low_cos_sim
+        self.last_base_source_label_shifts_count = base_source_label_shifts_count*1.0/n_sample
         
         # get the accumulated stats for stable perf audits.
         self.accumulated_loss += self.last_loss * n_sample
@@ -623,6 +636,20 @@ class ABSAIITTrainer:
             source_intervention_corr=source_intervention_corr,
         )
         
+        # bookkeeping stuff.
+        _, low_label_shifts_count = self._seq_classification_loss(
+            base_outputs["logits"][0], counterfactual_outputs["logits"][0].data.max(1)[1].long()
+        )
+        low_label_shifts_count = base_input_ids.shape[0] - low_label_shifts_count
+        _, high_label_shifts_count = self._abstract_classification_loss(
+            pred_base_labels, counterfactual_labels.data.max(1)[1].long(),
+        )    
+        high_label_shifts_count = base_input_ids.shape[0] - high_label_shifts_count
+        base_source_label_shifts_count = base_input_ids.shape[0] - (base_labels==source_labels).sum()
+        
+        cos = nn.CosineSimilarity(dim=1, eps=1e-6)
+        low_cos_sim = cos(base_outputs["logits"][0], counterfactual_outputs["logits"][0]).mean()
+        
         # high level model losses.
         abstract_cls_loss, abstract_cls_count = self._abstract_classification_loss(
             pred_base_labels, base_labels.long()
@@ -635,16 +662,13 @@ class ABSAIITTrainer:
         
         mul_cls_loss, mul_cls_count = \
                 self._mul_classification_loss(*base_outputs["logits"][1:], base_aspect_labels.long())
+        
         if self.high_level_model_type == "logistic_regression":
             counterfactual_labels = counterfactual_labels.data.max(1)[1] # logits to labels
         iit_cls_loss, iit_cls_count = self._seq_classification_loss(
             counterfactual_outputs["logits"][0], counterfactual_labels.long(), 
             base_intervention_corr!=-1
         )
-        
-        print((base_outputs["logits"][0].data.max(1)[1]==counterfactual_outputs["logits"][0].data.max(1)[1]).sum()/base_outputs["logits"][0].data.max(1)[1].shape[0])
-        print()
-        # print((base_labels.long() == counterfactual_labels.long()).sum()/counterfactual_labels.shape[0])
         
         loss = seq_cls_loss + self.curr_alpha * mul_cls_loss + self.curr_beta * iit_cls_loss
         if self.args.n_gpu > 1:
@@ -657,7 +681,8 @@ class ABSAIITTrainer:
             int((base_intervention_corr!=-1).sum()),
             loss, seq_cls_loss, mul_cls_loss, iit_cls_loss, 
             seq_cls_count, mul_cls_count, iit_cls_count,
-            abstract_cls_count,
+            abstract_cls_count, low_label_shifts_count, high_label_shifts_count, 
+            low_cos_sim, base_source_label_shifts_count
         )
         
         self.optimize(loss, abstract_cls_loss, skip_update_iter=skip_update_iter)
@@ -736,6 +761,10 @@ class ABSAIITTrainer:
                     
                     "train/effective_intervention": self.last_effective_intervention,
                     "train/high_level_seq_cls_acc": self.averaged_abstract_cls_acc,
+                    "train/low_iit_label_shifts": self.last_low_label_shifts_count,
+                    "train/high_iit_label_shifts": self.last_high_label_shifts_count,
+                    "train/low_cos_sim": self.last_low_cos_sim,
+                    "train/base_source_label_shifts": self.last_base_source_label_shifts_count,
                 }, 
                 step=self.n_total_iter
             )
