@@ -618,22 +618,27 @@ class ABSAIITTrainer:
         source_attention_mask = source_attention_mask.to(self.device)
         base_intervention_corr = base_intervention_corr.to(self.device)
         source_intervention_corr = source_intervention_corr.to(self.device)
-        
+        input_bundle = (
+            base_labels,
+            source_labels,
+            base_aspect_labels,
+            source_aspect_labels,
+            base_input_ids,
+            base_attention_mask,
+            source_input_ids,
+            source_attention_mask,
+            base_intervention_corr,
+            source_intervention_corr,
+        )
         # actual counterfactual labels with the high level model.
         # note: guess what, we allow gradients flow with the high level model as well.
-        pred_base_labels, _, counterfactual_labels = self.high_level_model.forward(
-            base_aspect_labels=base_aspect_labels,
-            source_aspect_labels=source_aspect_labels,
-            base_intervention_mask=base_intervention_mask,
-            source_intervention_mask=source_intervention_mask,
+        pred_base_labels, _, counterfactual_labels = self._high_level_model_forward(
+            *input_bundle
         )
             
         # predicted counterfactual labels with the low level model.
-        base_outputs, _, counterfactual_outputs = self.low_level_model.forward(
-            base=(base_input_ids, base_attention_mask),
-            source=(source_input_ids, source_attention_mask),
-            base_intervention_corr=base_intervention_corr,
-            source_intervention_corr=source_intervention_corr,
+        base_outputs, _, counterfactual_outputs = self._low_level_model_forward(
+            *input_bundle
         )
         
         # bookkeeping stuff.
@@ -696,6 +701,60 @@ class ABSAIITTrainer:
         )
         
         self.optimize(loss, abstract_cls_loss, skip_update_iter=skip_update_iter)
+    
+    def _low_level_model_forward(
+        self,
+        base_labels,
+        source_labels,
+        base_aspect_labels,
+        source_aspect_labels,
+        base_input_ids,
+        base_attention_mask,
+        source_input_ids,
+        source_attention_mask,
+        base_intervention_corr,
+        source_intervention_corr,
+    ):
+        # predicted counterfactual labels with the low level model.
+        base_outputs, source_outputs, counterfactual_outputs = self.low_level_model.forward(
+            base=(base_input_ids, base_attention_mask),
+            source=(source_input_ids, source_attention_mask),
+            base_intervention_corr=base_intervention_corr,
+            source_intervention_corr=source_intervention_corr,
+        )
+        return base_outputs, source_outputs, counterfactual_outputs
+    
+    def _high_level_model_forward(
+        self,
+        base_labels,
+        source_labels,
+        base_aspect_labels,
+        source_aspect_labels,
+        base_input_ids,
+        base_attention_mask,
+        source_input_ids,
+        source_attention_mask,
+        base_intervention_corr,
+        source_intervention_corr,
+    ):
+        if "bert" in self.high_level_model_type:
+            # high level model is another bert-based models
+            # much more like model distillation.
+            base_outputs, source_outputs, None = self.high_level_model.forward(
+                base=(base_input_ids, base_attention_mask),
+                source=(source_input_ids, source_attention_mask),
+                base_intervention_corr=None,
+                source_intervention_corr=None,
+            )
+            return base_outputs, source_outputs, None
+        else:
+            pred_base_labels, source_labels, counterfactual_labels = self.high_level_model.forward(
+                base_aspect_labels=base_aspect_labels,
+                source_aspect_labels=source_aspect_labels,
+                base_intervention_mask=base_intervention_mask,
+                source_intervention_mask=source_intervention_mask,
+            )
+        return pred_base_labels, source_labels, counterfactual_labels
     
     def optimize(self, loss, abstract_cls_loss, skip_update_iter=False):
         if self.args.gradient_accumulation_steps > 1:
