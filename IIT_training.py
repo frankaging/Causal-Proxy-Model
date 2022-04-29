@@ -35,6 +35,7 @@ from transformers.utils import check_min_version
 from transformers.utils.versions import require_version
 
 from models.modelings_roberta import *
+from models.modelings_bert import *
 from IITTrainer import *
 
 # Will error if the minimal version of Transformers is not installed. Remove at your own risks.
@@ -203,6 +204,12 @@ class ModelArguments:
             "help": "Loss coefficient for the IIT objective."}
     )
         
+    gemma: float = field(
+        default=0.0,
+        metadata={
+            "help": "Loss coefficient for larger counterfactual label shifts."}
+    )
+        
     wandb_metadata: str = field(
         default="go:IIT-ABSA",
         metadata={
@@ -274,7 +281,7 @@ def main():
     # overwrite the output dir a little bit.
     data_dir_postfix = data_args.dataset_name.strip("/").split("/")[-1]
     if training_args.do_train:
-        sub_output_dir = f"{data_args.task_name}.train.{data_args.train_split_name}"                         f".alpha.{model_args.alpha}.beta.{model_args.beta}"                         f".dim.{model_args.intervention_h_dim}"                         f".hightype.{model_args.high_level_model_type}.{data_dir_postfix}"
+        sub_output_dir = f"{data_args.task_name}.train.{data_args.train_split_name}"                         f".alpha.{model_args.alpha}.beta.{model_args.beta}.gemma.{model_args.gemma}"                         f".dim.{model_args.intervention_h_dim}"                         f".hightype.{model_args.high_level_model_type}.{data_dir_postfix}"
     elif training_args.do_eval:
         train_dir = model_args.model_name_or_path.strip("/").split("/")[-1]
         sub_output_dir = f"{train_dir}.eval.{data_args.eval_split_name}.{data_dir_postfix}"
@@ -360,13 +367,36 @@ def main():
         use_auth_token=True if model_args.use_auth_token else None,
     )
     
-    model = IITRobertaForSequenceClassification.from_pretrained(
-        model_args.model_name_or_path,
-        from_tf=bool(".ckpt" in model_args.model_name_or_path),
-        config=config,
-        cache_dir=model_args.cache_dir,
-        revision=model_args.model_revision,
-        use_auth_token=True if model_args.use_auth_token else None,
+    if "roberta" in model_args.model_name_or_path:
+        model = IITRobertaForSequenceClassification.from_pretrained(
+            model_args.model_name_or_path,
+            from_tf=bool(".ckpt" in model_args.model_name_or_path),
+            config=config,
+            cache_dir=model_args.cache_dir,
+            revision=model_args.model_revision,
+            use_auth_token=True if model_args.use_auth_token else None,
+        )
+    elif "bert" in model_args.model_name_or_path:
+        model = IITBERTForSequenceClassification.from_pretrained(
+            model_args.model_name_or_path,
+            from_tf=bool(".ckpt" in model_args.model_name_or_path),
+            config=config,
+            cache_dir=model_args.cache_dir,
+            revision=model_args.model_revision,
+            use_auth_token=True if model_args.use_auth_token else None,
+        )
+    else:
+        raise ValueError(
+            "Only support RoBERTa models and BERT models.")
+    
+    low_level_model = InterventionableIITTransformerForSequenceClassification(
+        model=model,
+        all_layers=model_args.all_layers
+    )
+    high_level_model = InterventionableAbstractionModelForABSA(
+        model=AbstractionModelForABSA(
+            model_type=model_args.high_level_model_type,
+        ),
     )
     
     # Preprocessing the raw_datasets
@@ -485,16 +515,6 @@ def main():
     else:
         data_collator = None
     
-    low_level_model = InterventionableIITRobertaForSequenceClassification(
-        model=model,
-        all_layers=model_args.all_layers
-    )
-    high_level_model = InterventionableAbstractionModelForABSA(
-        model=AbstractionModelForABSA(
-            model_type=model_args.high_level_model_type,
-        ),
-    )
-    
     # Initialize our Trainer
     trainer = ABSAIITTrainer(
         low_level_model=low_level_model,
@@ -506,6 +526,7 @@ def main():
         device=device,
         alpha=model_args.alpha,
         beta=model_args.beta,
+        gemma=model_args.gemma,
         wandb_metadata=model_args.wandb_metadata,
         eval_exclude_neutral=model_args.eval_exclude_neutral,
         high_level_model_type=model_args.high_level_model_type,

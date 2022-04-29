@@ -45,7 +45,7 @@ class ABSAIITTrainer:
         eval_dataset, 
         data_collator,
         device,
-        alpha, beta,
+        alpha, beta, gemma,
         wandb_metadata,
         eval_exclude_neutral,
         high_level_model_type,
@@ -59,8 +59,10 @@ class ABSAIITTrainer:
         
         self.alpha = alpha
         self.beta = beta
+        self.gemma = gemma
         self.curr_alpha = alpha
         self.curr_beta = beta
+        self.curr_gemma = gemma
         self.alpha_step = self.alpha/self.args.num_train_epochs
         self.beta_step = self.beta/self.args.num_train_epochs
         
@@ -150,7 +152,7 @@ class ABSAIITTrainer:
             
             # the high level model is trainable as well.
             self.high_level_model_optimizer = torch.optim.SGD(
-                self.high_level_model.model.parameters(), lr=0.1
+                self.high_level_model.model.parameters(), lr=0.01
             ) 
 
         # last.
@@ -516,8 +518,6 @@ class ABSAIITTrainer:
         labels,
         loss_mask=None,
     ):
-        
-        
         loss_mask = torch.ones(logits.shape[0]).bool().to(self.device) if loss_mask == None else loss_mask
         loss_fct = CrossEntropyLoss()
         
@@ -648,7 +648,7 @@ class ABSAIITTrainer:
         base_source_label_shifts_count = base_input_ids.shape[0] - (base_labels==source_labels).sum()
         
         cos = nn.CosineSimilarity(dim=1, eps=1e-6)
-        low_cos_sim = cos(base_outputs["logits"][0], counterfactual_outputs["logits"][0]).mean()
+        low_cos_sim = cos(base_outputs["logits"][0], counterfactual_outputs["logits"][0])
         
         # high level model losses.
         abstract_cls_loss, abstract_cls_count = self._abstract_classification_loss(
@@ -664,13 +664,23 @@ class ABSAIITTrainer:
                 self._mul_classification_loss(*base_outputs["logits"][1:], base_aspect_labels.long())
         
         if self.high_level_model_type == "logistic_regression":
+            pred_base_labels = pred_base_labels.data.max(1)[1] # logits to labels
             counterfactual_labels = counterfactual_labels.data.max(1)[1] # logits to labels
+        counterfactual_efficacy_mask = pred_base_labels.long()==counterfactual_labels.long()
+        counterfactual_efficacy_loss = low_cos_sim * counterfactual_efficacy_mask
+        counterfactual_efficacy_loss = counterfactual_efficacy_loss.mean()
+        low_cos_sim = low_cos_sim.mean()
+            
         iit_cls_loss, iit_cls_count = self._seq_classification_loss(
             counterfactual_outputs["logits"][0], counterfactual_labels.long(), 
             base_intervention_corr!=-1
         )
         
-        loss = seq_cls_loss + self.curr_alpha * mul_cls_loss + self.curr_beta * iit_cls_loss
+        loss = seq_cls_loss + \
+            self.curr_alpha * mul_cls_loss + \
+            self.curr_beta * iit_cls_loss + \
+            self.curr_gemma * counterfactual_efficacy_loss
+        
         if self.args.n_gpu > 1:
             loss = loss.mean()  # mean() to average on multi-gpu.
             abstract_cls_loss = None if abstract_cls_loss is None else abstract_cls_loss.mean()

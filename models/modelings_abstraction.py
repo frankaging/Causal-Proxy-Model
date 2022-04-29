@@ -14,7 +14,7 @@ class AbstractionModelForABSA(nn.Module):
             self.num_aspect * self.num_dim_per_aspect, 
             self.num_aspect * self.num_dim_per_aspect
         )
-        classifier_dropout = 0.0
+        classifier_dropout = 0.1
         self.dropout = nn.Dropout(classifier_dropout)
         self.out_proj = nn.Linear(
             self.num_aspect * self.num_dim_per_aspect, 
