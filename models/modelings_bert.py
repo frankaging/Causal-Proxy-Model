@@ -724,7 +724,7 @@ class BertEncoder(nn.Module):
                     all_cross_attentions = all_cross_attentions + (layer_outputs[2],)
                     
             # INT_POINT: only the last layer!
-            if base_intervention_corr and source_hidden_states and i == self.config.num_hidden_layers-1:
+            if base_intervention_corr is not None and source_hidden_states and i == self.config.num_hidden_layers-1:
                 for b in range(0, hidden_states.shape[0]):
                     if base_intervention_corr[b] != -1:
                         start_idx = base_intervention_corr[b]*self.intervention_h_dim
@@ -1418,20 +1418,25 @@ class InterventionableIITTransformerForSequenceClassification():
         base_intervention_corr,
         source_intervention_corr,
     ):
-        (base_input_ids, base_attention_mask) = base
-        base_outputs = self.model(
-            input_ids=base_input_ids,
-            attention_mask=base_attention_mask,
-            output_hidden_states=self.multitask,
-        )
-        (source_input_ids, source_attention_mask) = source
-        source_outputs = self.model(
-            input_ids=source_input_ids,
-            attention_mask=source_attention_mask,
-            output_hidden_states=True,
-        )
-        counterfactual_outputs = None
-        if base_intervention_corr:
+        base_outputs, source_outputs, counterfactual_outputs = None, None, None
+        
+        if base is not None:
+            (base_input_ids, base_attention_mask) = base
+            base_outputs = self.model(
+                input_ids=base_input_ids,
+                attention_mask=base_attention_mask,
+                output_hidden_states=self.multitask,
+            )
+        
+        if source is not None:
+            (source_input_ids, source_attention_mask) = source
+            source_outputs = self.model(
+                input_ids=source_input_ids,
+                attention_mask=source_attention_mask,
+                output_hidden_states=True,
+            )
+        
+        if base_intervention_corr is not None:
             counterfactual_outputs = self.model(
                 input_ids=base_input_ids,
                 attention_mask=base_attention_mask,

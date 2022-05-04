@@ -677,7 +677,7 @@ class RobertaEncoder(nn.Module):
                     all_cross_attentions = all_cross_attentions + (layer_outputs[2],)
                     
             # INT_POINT: only the last layer!
-            if base_intervention_corr and source_hidden_states and i == self.config.num_hidden_layers-1:
+            if base_intervention_corr is not None and source_hidden_states and i == self.config.num_hidden_layers-1:
                 for b in range(0, hidden_states.shape[0]):
                     if base_intervention_corr[b] != -1:
                         start_idx = base_intervention_corr[b]*self.intervention_h_dim

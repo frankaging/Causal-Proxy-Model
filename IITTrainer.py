@@ -45,10 +45,11 @@ class ABSAIITTrainer:
         eval_dataset, 
         data_collator,
         device,
-        alpha, beta, gemma,
+        alpha, beta,
         wandb_metadata,
         eval_exclude_neutral,
         high_level_model_type,
+        mode,
     ):
         self.args = args
         self.train_dataset = train_dataset
@@ -59,16 +60,15 @@ class ABSAIITTrainer:
         
         self.alpha = alpha
         self.beta = beta
-        self.gemma = gemma
         self.curr_alpha = alpha
         self.curr_beta = beta
-        self.curr_gemma = gemma
         self.alpha_step = self.alpha/self.args.num_train_epochs
         self.beta_step = self.beta/self.args.num_train_epochs
         
         self.eval_exclude_neutral = eval_exclude_neutral
         self.high_level_model_type = high_level_model_type
         
+        self.mode = mode
         # device
         self.device = device
         self.high_level_model.model.to(self.device)
@@ -155,6 +155,8 @@ class ABSAIITTrainer:
                 self.high_level_model.model.parameters(), lr=0.01
             ) 
 
+        self.ce_loss_fct = nn.KLDivLoss(reduction="batchmean")
+            
         # last.
         self.total_loss_epoch = 0
         self.last_loss = 0.0
@@ -168,8 +170,6 @@ class ABSAIITTrainer:
         
         self.last_effective_intervention = 0.0
         self.last_low_label_shifts_count = 0.0
-        self.last_high_label_shifts_count = 0.0
-        self.last_low_cos_sim = 0.0
         self.last_base_source_label_shifts_count = 0.0
         
         # accumulated.
@@ -181,8 +181,7 @@ class ABSAIITTrainer:
         self.accumulated_seq_cls_count = 0
         self.accumulated_mul_cls_count = 0
         self.accumulated_iit_cls_count = 0
-        
-        self.accumulated_abstract_cls_count = 0
+
         
         # averaged.
         self.averaged_loss = 0.0
@@ -193,7 +192,6 @@ class ABSAIITTrainer:
         self.averaged_seq_cls_acc = 1.0/5
         self.averaged_mul_cls_acc = 1.0/3
         self.averaged_iit_cls_acc = 1.0/5
-        self.averaged_abstract_cls_acc = 1.0/5
         
         # log to a local file
         log_train = open(os.path.join(self.args.output_dir, 'train_log.txt'), 'w', buffering=1)
@@ -221,8 +219,12 @@ class ABSAIITTrainer:
         source_labels = source_labels[_sort_index]
         source_aspect_labels = source_aspect_labels[_sort_index]
         
+        counterfactual_input_ids = input_ids.clone()
+        counterfactual_attention_mask = attention_mask.clone()
+        
         return input_ids, attention_mask, labels, aspect_labels.float(), \
-            source_input_ids, source_attention_mask, source_labels, source_aspect_labels.float()
+            source_input_ids, source_attention_mask, source_labels, source_aspect_labels.float(), \
+            counterfactual_input_ids, counterfactual_attention_mask
     
     def _calculate_metrics(
         self,
@@ -252,7 +254,6 @@ class ABSAIITTrainer:
         accumulated_seq_cls_count = 0
         accumulated_mul_cls_count = 0
         accumulated_iit_cls_count = 0
-        accumulated_abstract_cls_count = 0
         
         # averaged.
         averaged_loss = 0.0
@@ -263,7 +264,6 @@ class ABSAIITTrainer:
         averaged_seq_cls_acc = 1.0/5
         averaged_mul_cls_acc = 1.0/3
         averaged_iit_cls_acc = 1.0/5
-        averaged_abstract_cls_acc = 1.0/5
         
         n_sequences_epoch = 0
         n_effective_iit_sequence_epoch = 0
@@ -293,7 +293,8 @@ class ABSAIITTrainer:
                 base_input_ids, base_attention_mask, \
                     base_labels, base_aspect_labels, \
                     source_input_ids, source_attention_mask, \
-                    source_labels, source_aspect_labels = \
+                    source_labels, source_aspect_labels, \
+                    counterfactual_input_ids, counterfactual_attention_mask = \
                 self.prepare_batch(
                     *(input_ids, attention_mask, labels, aspect_labels)
                 )
@@ -314,46 +315,73 @@ class ABSAIITTrainer:
                 source_attention_mask = source_attention_mask.to(self.device)
                 base_intervention_corr = base_intervention_corr.to(self.device)
                 source_intervention_corr = source_intervention_corr.to(self.device)
-
-                # actual counterfactual labels with the high level model.
-                pred_base_labels, _, counterfactual_labels = self.high_level_model.forward(
-                    base_aspect_labels=base_aspect_labels,
-                    source_aspect_labels=source_aspect_labels,
-                    base_intervention_mask=base_intervention_mask,
-                    source_intervention_mask=source_intervention_mask,
+                # optional.
+                counterfactual_input_ids = counterfactual_input_ids.to(self.device)
+                counterfactual_attention_mask = counterfactual_attention_mask.to(self.device)
+                input_bundle = (
+                    base_labels,
+                    source_labels,
+                    base_aspect_labels,
+                    source_aspect_labels,
+                    base_input_ids,
+                    base_attention_mask,
+                    source_input_ids,
+                    source_attention_mask,
+                    base_intervention_corr,
+                    source_intervention_corr,
+                    base_intervention_mask, 
+                    source_intervention_mask,
+                    counterfactual_input_ids,
+                    counterfactual_attention_mask,
                 )
+        
+                #############################################
+                # high level model.
+                with torch.no_grad():
+                    pred_base_labels, _, counterfactual_labels = self._high_level_model_forward(
+                        *input_bundle
+                    )  
+                # low level model.
+                base_outputs, _, counterfactual_outputs = self._low_level_model_forward(
+                    *input_bundle
+                )
+                #############################################
                 
-                # predicted counterfactual labels with the low level model.
-                base_outputs, _, counterfactual_outputs = self.low_level_model.forward(
-                    base=(base_input_ids, base_attention_mask),
-                    source=(source_input_ids, source_attention_mask),
-                    base_intervention_corr=base_intervention_corr,
-                    source_intervention_corr=source_intervention_corr,
-                )
-
-                # high level model losses.
-                _, abstract_cls_count = self._abstract_classification_loss(
-                    pred_base_labels, base_labels.long()
-                )    
-                
-                # various losses.
-                seq_cls_loss, seq_cls_count = self._seq_classification_loss(
-                    base_outputs["logits"][0], base_labels.long()
-                )
-
+                #############################################   
+                # loss: task objective which is classification loss.
+                if "bert" in self.high_level_model_type:
+                    seq_cls_loss, seq_cls_count = self._logits_matching_loss(
+                        base_outputs["logits"][0], pred_base_labels["logits"][0]
+                    )
+                else:
+                    seq_cls_loss, seq_cls_count = self._seq_classification_loss(
+                        base_outputs["logits"][0], base_labels.long()
+                    )
+                # loss: multitask objective.
                 mul_cls_loss, mul_cls_count = \
                         self._mul_classification_loss(*base_outputs["logits"][1:], base_aspect_labels.long())
-                
-                if self.high_level_model_type == "logistic_regression":
-                    counterfactual_labels = counterfactual_labels.data.max(1)[1] # logits to labels
-                iit_cls_loss, iit_cls_count = self._seq_classification_loss(
-                    counterfactual_outputs["logits"][0], counterfactual_labels.long(), 
-                    base_intervention_corr!=-1
-                )
-
-                loss = seq_cls_loss + self.alpha * mul_cls_loss + self.beta * iit_cls_loss
+                # loss: iit loss.
+                if "bert" in self.high_level_model_type:
+                    iit_cls_loss, iit_cls_count = self._logits_matching_loss(
+                        counterfactual_outputs["logits"][0], counterfactual_labels["logits"][0], 
+                        loss_mask=base_intervention_corr!=-1
+                    )
+                else:
+                    if self.high_level_model_type != "majority_voting":
+                        counterfactual_labels = counterfactual_labels.data.max(1)[1] # logits to labels
+                    iit_cls_loss, iit_cls_count = self._seq_classification_loss(
+                        counterfactual_outputs["logits"][0], counterfactual_labels.long(), 
+                        base_intervention_corr!=-1
+                    )
+                # loss: sum all losses together.
+                loss = seq_cls_loss + \
+                    self.curr_alpha * mul_cls_loss + \
+                    self.curr_beta * iit_cls_loss
                 if self.args.n_gpu > 1:
                     loss = loss.mean()  # mean() to average on multi-gpu.
+                    abstract_cls_loss = None # WARNING: we decide not to train our high level model
+                                             # with the low level model. this is for future research!
+                #############################################
 
                 # get the accumulated stats for stable perf audits.
                 n_sample = base_input_ids.shape[0]
@@ -365,7 +393,6 @@ class ABSAIITTrainer:
                 accumulated_seq_cls_count += seq_cls_count
                 accumulated_mul_cls_count += mul_cls_count
                 accumulated_iit_cls_count += iit_cls_count
-                accumulated_abstract_cls_count += abstract_cls_count
                 
                 n_sequences_epoch += n_sample
                 n_effective_aspect_sequence_epoch += int((base_aspect_labels.long()!=-1).sum())
@@ -385,7 +412,6 @@ class ABSAIITTrainer:
         eval_seq_cls_acc = accumulated_seq_cls_count / n_sequences_epoch
         eval_mul_cls_acc = accumulated_mul_cls_count / n_effective_aspect_sequence_epoch
         eval_iit_cls_acc = accumulated_iit_cls_count / n_effective_iit_sequence_epoch
-        eval_abstract_cls_acc = accumulated_abstract_cls_count / n_sequences_epoch
         
         # metrics.
         seq_cls_eval_metrics = self._calculate_metrics(
@@ -421,13 +447,11 @@ class ABSAIITTrainer:
                     "eval/accuracy" : seq_cls_eval_metrics["accuracy"],
                     "eval/Macro-F1" : seq_cls_eval_metrics["Macro-F1"],
                     "eval/Weighted-Macro-F1" : seq_cls_eval_metrics["Weighted-Macro-F1"],
-                    "eval/high_level_seq_cls_acc" : eval_abstract_cls_acc,
-                    'epoch': self.epoch+1
                 }, 
             )
         elif "none" in self.args.report_to:
             pass
-
+        
     def train(self):
         global_step = 0
         nb_tr_steps = 0
@@ -458,9 +482,10 @@ class ABSAIITTrainer:
                 prepared_batch = self.prepare_batch(
                     *(input_ids, attention_mask, labels, aspect_labels)
                 )
-                self.step(
-                    *prepared_batch
-                )
+                if self.mode == "align":
+                    self._step_align(*prepared_batch)
+                else:
+                    self._step_iit(*prepared_batch)
                 iter_bar.update()
                 iter_bar.set_postfix(
                     {
@@ -497,20 +522,48 @@ class ABSAIITTrainer:
         return intervention_mask, intervention_mask, \
             torch.tensor(intervention_corr), torch.tensor(intervention_corr)
     
+    def _logits_matching_loss(
+        self,
+        pred_logits,
+        actual_logits,
+        temperature=2.0,
+        loss_mask=None,
+    ):
+        loss_ce = (
+            self.ce_loss_fct(
+                nn.functional.log_softmax(pred_logits / temperature, dim=-1),
+                nn.functional.softmax(actual_logits / temperature, dim=-1),
+            )
+            * (temperature) ** 2
+        )
+        
+        loss_mask = torch.ones(pred_logits.shape[0]).bool().to(self.device) if loss_mask == None else loss_mask
+        pred_labels = pred_logits.data.max(1)[1].long()[loss_mask]
+        actual_labels = actual_logits.data.max(1)[1].long()[loss_mask]
+        correct_count = pred_labels.eq(actual_labels).sum().cpu().item()  
+        
+        return loss_ce, correct_count
+    
     def _abstract_classification_loss(
         self,
         logits, # this may be logits, but lets see...
         labels,
         loss_mask=None,
+        labels_as_logits=False,
     ):
-        if self.high_level_model_type == "logistic_regression":
+        if labels is None:
+            return None, 0
+        
+        if self.high_level_model_type != "majority_voting":
+            if labels_as_logits:
+                labels = labels.data.max(1)[1].long()
             return self._seq_classification_loss(logits, labels, loss_mask)
         else:
             loss_mask = torch.ones(labels.shape[0]).bool().to(self.device) if loss_mask == None else loss_mask
             pred_cls = logits[loss_mask]
             correct_count = pred_cls.eq(labels[loss_mask]).sum().cpu().item()   
             return None, correct_count
-        return None, None
+        return None, 0
 
     def _seq_classification_loss(
         self,
@@ -547,9 +600,10 @@ class ABSAIITTrainer:
     def _record(
         self, n_sample, n_effective_aspect_sequence, n_effective_iit_sequence,
         loss, seq_cls_loss, mul_cls_loss, iit_cls_loss,
-        seq_cls_count, mul_cls_count, iit_cls_count, abstract_cls_count,
-        low_label_shifts_count, high_label_shifts_count, low_cos_sim,
-        base_source_label_shifts_count
+        seq_cls_count, mul_cls_count, iit_cls_count,
+        # optional
+        low_label_shifts_count=0,
+        base_source_label_shifts_count=0
     ):
         self.total_loss_epoch += loss.item()
         self.last_loss = loss.item()
@@ -563,8 +617,6 @@ class ABSAIITTrainer:
         
         self.last_effective_intervention = n_effective_iit_sequence*1.0/n_sample
         self.last_low_label_shifts_count = low_label_shifts_count*1.0/n_sample
-        self.last_high_label_shifts_count = high_label_shifts_count*1.0/n_sample
-        self.last_low_cos_sim = low_cos_sim
         self.last_base_source_label_shifts_count = base_source_label_shifts_count*1.0/n_sample
         
         # get the accumulated stats for stable perf audits.
@@ -577,8 +629,7 @@ class ABSAIITTrainer:
         self.accumulated_seq_cls_count += seq_cls_count
         self.accumulated_mul_cls_count += mul_cls_count
         self.accumulated_iit_cls_count += iit_cls_count
-        
-        self.accumulated_abstract_cls_count += abstract_cls_count
+     
         
         self.n_sequences_epoch += n_sample
         self.n_effective_aspect_sequence_epoch += n_effective_aspect_sequence
@@ -592,14 +643,14 @@ class ABSAIITTrainer:
         self.averaged_seq_cls_acc = self.accumulated_seq_cls_count / self.n_sequences_epoch
         self.averaged_mul_cls_acc = self.accumulated_mul_cls_count / self.n_effective_aspect_sequence_epoch
         self.averaged_iit_cls_acc = self.accumulated_iit_cls_count / self.n_effective_iit_sequence_epoch
-        self.averaged_abstract_cls_acc = self.accumulated_abstract_cls_count / self.n_sequences_epoch
     
-    def step(
+    def _step_iit(
         self,
         base_input_ids, base_attention_mask, 
         base_labels, base_aspect_labels,
         source_input_ids, source_attention_mask, 
         source_labels, source_aspect_labels,
+        counterfactual_input_ids, counterfactual_attention_mask,
         skip_update_iter=False
     ):
         base_intervention_mask, source_intervention_mask, \
@@ -618,6 +669,9 @@ class ABSAIITTrainer:
         source_attention_mask = source_attention_mask.to(self.device)
         base_intervention_corr = base_intervention_corr.to(self.device)
         source_intervention_corr = source_intervention_corr.to(self.device)
+        # optional.
+        counterfactual_input_ids = counterfactual_input_ids.to(self.device)
+        counterfactual_attention_mask = counterfactual_attention_mask.to(self.device)
         input_bundle = (
             base_labels,
             source_labels,
@@ -629,78 +683,158 @@ class ABSAIITTrainer:
             source_attention_mask,
             base_intervention_corr,
             source_intervention_corr,
+            base_intervention_mask, 
+            source_intervention_mask,
+            counterfactual_input_ids,
+            counterfactual_attention_mask,
         )
-        # actual counterfactual labels with the high level model.
-        # note: guess what, we allow gradients flow with the high level model as well.
-        pred_base_labels, _, counterfactual_labels = self._high_level_model_forward(
-            *input_bundle
-        )
-            
-        # predicted counterfactual labels with the low level model.
+
+        #############################################
+        # high level model.
+        with torch.no_grad():
+            pred_base_labels, _, counterfactual_labels = self._high_level_model_forward(
+                *input_bundle
+            )  
+        # low level model.
         base_outputs, _, counterfactual_outputs = self._low_level_model_forward(
             *input_bundle
         )
+        #############################################
         
-        # bookkeeping stuff.
+        #############################################
+        # bookkeeping
         _, low_label_shifts_count = self._seq_classification_loss(
             base_outputs["logits"][0], counterfactual_outputs["logits"][0].data.max(1)[1].long()
         )
         low_label_shifts_count = base_input_ids.shape[0] - low_label_shifts_count
-        _, high_label_shifts_count = self._abstract_classification_loss(
-            pred_base_labels, counterfactual_labels.data.max(1)[1].long(),
-        )    
-        high_label_shifts_count = base_input_ids.shape[0] - high_label_shifts_count
-        base_source_label_shifts_count = base_input_ids.shape[0] - (base_labels==source_labels).sum()
+        base_source_label_shifts_count = base_input_ids.shape[0] - (base_labels==source_labels).sum()  
+        #############################################
         
-        cos = nn.CosineSimilarity(dim=1, eps=1e-6)
-        low_cos_sim = cos(base_outputs["logits"][0], counterfactual_outputs["logits"][0])
-        
-        # high level model losses.
-        abstract_cls_loss, abstract_cls_count = self._abstract_classification_loss(
-            pred_base_labels, base_labels.long()
-        )        
-        
-        # various losses.
+        #############################################   
+        # loss: low level model for classification
         seq_cls_loss, seq_cls_count = self._seq_classification_loss(
             base_outputs["logits"][0], base_labels.long()
         )
-        
+        # loss: low level model for multi-task
         mul_cls_loss, mul_cls_count = \
                 self._mul_classification_loss(*base_outputs["logits"][1:], base_aspect_labels.long())
-        
-        if self.high_level_model_type == "logistic_regression":
-            pred_base_labels = pred_base_labels.data.max(1)[1] # logits to labels
+        # loss: low level model for mimicing high level model
+        if self.high_level_model_type != "majority_voting":
             counterfactual_labels = counterfactual_labels.data.max(1)[1] # logits to labels
-        counterfactual_efficacy_mask = pred_base_labels.long()==counterfactual_labels.long()
-        counterfactual_efficacy_loss = low_cos_sim * counterfactual_efficacy_mask
-        counterfactual_efficacy_loss = counterfactual_efficacy_loss.mean()
-        low_cos_sim = low_cos_sim.mean()
-            
         iit_cls_loss, iit_cls_count = self._seq_classification_loss(
             counterfactual_outputs["logits"][0], counterfactual_labels.long(), 
             base_intervention_corr!=-1
         )
-        
         loss = seq_cls_loss + \
             self.curr_alpha * mul_cls_loss + \
-            self.curr_beta * iit_cls_loss + \
-            self.curr_gemma * counterfactual_efficacy_loss
-        
+            self.curr_beta * iit_cls_loss
         if self.args.n_gpu > 1:
             loss = loss.mean()  # mean() to average on multi-gpu.
-            abstract_cls_loss = None if abstract_cls_loss is None else abstract_cls_loss.mean()
+            abstract_cls_loss = None # WARNING: we decide not to train our high level model
+                                     # with the low level model. this is for future research!
+        #############################################
         
+        # record, and grad descent.
         self._record(
             base_input_ids.shape[0], 
             int((base_aspect_labels.long()!=-1).sum()), 
             int((base_intervention_corr!=-1).sum()),
             loss, seq_cls_loss, mul_cls_loss, iit_cls_loss, 
             seq_cls_count, mul_cls_count, iit_cls_count,
-            abstract_cls_count, low_label_shifts_count, high_label_shifts_count, 
-            low_cos_sim, base_source_label_shifts_count
+            low_label_shifts_count, 
+            base_source_label_shifts_count
         )
+        self.optimize(loss, None, skip_update_iter=skip_update_iter)
+    
+    def _step_align(
+        self,
+        base_input_ids, base_attention_mask, 
+        base_labels, base_aspect_labels,
+        source_input_ids, source_attention_mask, 
+        source_labels, source_aspect_labels,
+        counterfactual_input_ids, counterfactual_attention_mask,
+        skip_update_iter=False
+    ):
+        base_intervention_mask, source_intervention_mask, \
+            base_intervention_corr, source_intervention_corr = self._get_interchange_mask(
+            base_aspect_labels, source_aspect_labels
+        )
+
+        # send all data to gpus.
+        base_labels = base_labels.to(self.device)
+        source_labels = source_labels.to(self.device)
+        base_aspect_labels = base_aspect_labels.to(self.device)
+        source_aspect_labels = source_aspect_labels.to(self.device)
+        base_input_ids = base_input_ids.to(self.device)
+        base_attention_mask = base_attention_mask.to(self.device)
+        source_input_ids = source_input_ids.to(self.device)
+        source_attention_mask = source_attention_mask.to(self.device)
+        base_intervention_corr = base_intervention_corr.to(self.device)
+        source_intervention_corr = source_intervention_corr.to(self.device)
+        # optional.
+        counterfactual_input_ids = counterfactual_input_ids.to(self.device)
+        counterfactual_attention_mask = counterfactual_attention_mask.to(self.device)
+        input_bundle = (
+            base_labels,
+            source_labels,
+            base_aspect_labels,
+            source_aspect_labels,
+            base_input_ids,
+            base_attention_mask,
+            source_input_ids,
+            source_attention_mask,
+            base_intervention_corr,
+            source_intervention_corr,
+            base_intervention_mask, 
+            source_intervention_mask,
+            counterfactual_input_ids,
+            counterfactual_attention_mask,
+        )
+
+        #############################################
+        # high level model.
+        with torch.no_grad():
+            pred_base_labels, _, counterfactual_labels = self._high_level_model_forward(
+                *input_bundle
+            )  
+        # low level model.
+        base_outputs, _, counterfactual_outputs = self._low_level_model_forward(
+            *input_bundle
+        )
+        #############################################
         
-        self.optimize(loss, abstract_cls_loss, skip_update_iter=skip_update_iter)
+        #############################################   
+        # loss: low level model for classification
+        seq_cls_loss, seq_cls_count = self._logits_matching_loss(
+            base_outputs["logits"][0], pred_base_labels["logits"][0]
+        )
+        # loss: low level model for multi-task
+        mul_cls_loss, mul_cls_count = \
+                self._mul_classification_loss(*base_outputs["logits"][1:], base_aspect_labels.long())
+        # loss: low level model for mimicing high level model
+        iit_cls_loss, iit_cls_count = self._logits_matching_loss(
+            counterfactual_outputs["logits"][0], counterfactual_labels["logits"][0], 
+            loss_mask=base_intervention_corr!=-1
+        )
+        loss = seq_cls_loss + \
+            self.curr_alpha * mul_cls_loss + \
+            self.curr_beta * iit_cls_loss
+        if self.args.n_gpu > 1:
+            loss = loss.mean()  # mean() to average on multi-gpu.
+            abstract_cls_loss = None # WARNING: we decide not to train our high level model
+                                     # with the low level model. this is for future research!
+        #############################################
+        
+        # record, and grad descent.
+        self._record(
+            base_input_ids.shape[0], 
+            int((base_aspect_labels.long()!=-1).sum()), 
+            int((base_intervention_corr!=-1).sum()),
+            loss, seq_cls_loss, mul_cls_loss, iit_cls_loss, 
+            seq_cls_count, mul_cls_count, iit_cls_count,
+            0, 0
+        )
+        self.optimize(loss, None, skip_update_iter=skip_update_iter)
     
     def _low_level_model_forward(
         self,
@@ -714,6 +848,11 @@ class ABSAIITTrainer:
         source_attention_mask,
         base_intervention_corr,
         source_intervention_corr,
+        base_intervention_mask, 
+        source_intervention_mask,
+        # we maybe explicity create counterfactual input already!
+        counterfactual_input_ids=None,
+        counterfactual_attention_mask=None,
     ):
         # predicted counterfactual labels with the low level model.
         base_outputs, source_outputs, counterfactual_outputs = self.low_level_model.forward(
@@ -736,25 +875,36 @@ class ABSAIITTrainer:
         source_attention_mask,
         base_intervention_corr,
         source_intervention_corr,
-    ):
+        base_intervention_mask, 
+        source_intervention_mask,
+        # we maybe explicity create counterfactual input already!
+        counterfactual_input_ids=None,
+        counterfactual_attention_mask=None,
+    ): 
         if "bert" in self.high_level_model_type:
             # high level model is another bert-based models
             # much more like model distillation.
-            base_outputs, source_outputs, None = self.high_level_model.forward(
+            pred_base_labels, pred_source_labels, _ = self.high_level_model.forward(
                 base=(base_input_ids, base_attention_mask),
                 source=(source_input_ids, source_attention_mask),
                 base_intervention_corr=None,
                 source_intervention_corr=None,
             )
-            return base_outputs, source_outputs, None
+            # for BERT, we actually explicity feed through counterfactual inputs!
+            counterfactual_labels, _, _ = self.high_level_model.forward(
+                base=(counterfactual_input_ids, counterfactual_attention_mask),
+                source=None,
+                base_intervention_corr=None,
+                source_intervention_corr=None,
+            )
         else:
-            pred_base_labels, source_labels, counterfactual_labels = self.high_level_model.forward(
+            pred_base_labels, pred_source_labels, counterfactual_labels = self.high_level_model.forward(
                 base_aspect_labels=base_aspect_labels,
                 source_aspect_labels=source_aspect_labels,
                 base_intervention_mask=base_intervention_mask,
                 source_intervention_mask=source_intervention_mask,
             )
-        return pred_base_labels, source_labels, counterfactual_labels
+        return pred_base_labels, pred_source_labels, counterfactual_labels
     
     def optimize(self, loss, abstract_cls_loss, skip_update_iter=False):
         if self.args.gradient_accumulation_steps > 1:
@@ -829,10 +979,7 @@ class ABSAIITTrainer:
                     "train/speed": time.time()-self.last_log,
                     
                     "train/effective_intervention": self.last_effective_intervention,
-                    "train/high_level_seq_cls_acc": self.averaged_abstract_cls_acc,
                     "train/low_iit_label_shifts": self.last_low_label_shifts_count,
-                    "train/high_iit_label_shifts": self.last_high_label_shifts_count,
-                    "train/low_cos_sim": self.last_low_cos_sim,
                     "train/base_source_label_shifts": self.last_base_source_label_shifts_count,
                 }, 
                 step=self.n_total_iter

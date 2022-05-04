@@ -41,7 +41,9 @@ from IITTrainer import *
 # Will error if the minimal version of Transformers is not installed. Remove at your own risks.
 task_to_keys = {
     "opentable": ("text", None),
+    "CEBaB": ("description", None),
 }
+label_key = "review_majority"
 
 import logging
 logger = logging.getLogger(__name__)
@@ -157,6 +159,10 @@ class ModelArguments:
         metadata={
             "help": "Path to pretrained model or model identifier from huggingface.co/models"}
     )
+    high_level_model_name_or_path: str = field(
+        default=None, metadata={
+            "help": "Path to pretrained model or model identifier from huggingface.co/models"}
+    )
     config_name: Optional[str] = field(
         default=None, metadata={"help": "Pretrained config name or path if not the same as model_name"}
     )
@@ -203,13 +209,7 @@ class ModelArguments:
         metadata={
             "help": "Loss coefficient for the IIT objective."}
     )
-        
-    gemma: float = field(
-        default=0.0,
-        metadata={
-            "help": "Loss coefficient for larger counterfactual label shifts."}
-    )
-        
+
     wandb_metadata: str = field(
         default="go:IIT-ABSA",
         metadata={
@@ -228,12 +228,18 @@ class ModelArguments:
             "help": "Hidden dimension size to interchange per aspect."}
     )
         
-    high_level_model_type: str = field(
+    high_level_model_type_or_path: str = field(
         default="logistic_regression",
         metadata={
             "help": "How the high level model infer the correct label."}
     )
       
+    mode: str = field(
+        default="align",
+        metadata={
+            "help": "What is the mode of this training."}
+    )
+    
     all_layers: bool = field(
         default=False,
         metadata={
@@ -279,9 +285,14 @@ def main():
     
     # make the name shorter.
     # overwrite the output dir a little bit.
+    high_type = "logistic_regression"
+    if "bert" in model_args.high_level_model_type_or_path:
+        high_type = "bert"
+    elif "voting" in model_args.high_level_model_type_or_path:
+        high_type = "voting"
     data_dir_postfix = data_args.dataset_name.strip("/").split("/")[-1]
     if training_args.do_train:
-        sub_output_dir = f"{data_args.task_name}.train.{data_args.train_split_name}"                         f".alpha.{model_args.alpha}.beta.{model_args.beta}.gemma.{model_args.gemma}"                         f".dim.{model_args.intervention_h_dim}"                         f".hightype.{model_args.high_level_model_type}.{data_dir_postfix}"
+        sub_output_dir = f"{data_args.task_name}.train.{data_args.train_split_name}"                         f".alpha.{model_args.alpha}.beta.{model_args.beta}"                         f".dim.{model_args.intervention_h_dim}"                         f".hightype.{high_type}.{data_dir_postfix}"                         f".mode.{model_args.mode}"
     elif training_args.do_eval:
         train_dir = model_args.model_name_or_path.strip("/").split("/")[-1]
         sub_output_dir = f"{train_dir}.eval.{data_args.eval_split_name}.{data_dir_postfix}"
@@ -328,16 +339,25 @@ def main():
     set_seed(training_args.seed)
     
     is_regression = False  # Ours: probably not a regression task?
-    if data_args.dataset_name is not None and os.path.isdir(data_args.dataset_name):
+    if data_args.dataset_name is not None and not os.path.isdir(data_args.dataset_name):
+        raw_datasets = load_dataset(
+            data_args.dataset_name,
+            cache_dir="../huggingface_cache/"
+        )
+    # we should keep using this later, as we want to use the HF dataset!
+    elif data_args.dataset_name is not None and os.path.isdir(data_args.dataset_name):
         raw_datasets = load_from_disk(
             data_args.dataset_name,
         )
     else:
         raise ValueError(
             "Need a huggingface datasets formatted directory for `dataset_name`.")
-        
-    label_list = sorted(list(set(raw_datasets["train"]["label"]).union(
-        set(raw_datasets["validation"]["label"]))))
+    
+    # we need to filter labels in the train: excluding the no majority cases
+    raw_datasets["train"] = raw_datasets["train"].filter(lambda example: example[label_key]!="no majority")
+    
+    label_list = sorted(list(set(raw_datasets["train"][label_key]).union(
+        set(raw_datasets["validation"][label_key]))))
         
     num_labels = len(label_list)
     
@@ -368,36 +388,52 @@ def main():
     )
     
     if "roberta" in model_args.model_name_or_path:
-        model = IITRobertaForSequenceClassification.from_pretrained(
-            model_args.model_name_or_path,
-            from_tf=bool(".ckpt" in model_args.model_name_or_path),
-            config=config,
-            cache_dir=model_args.cache_dir,
-            revision=model_args.model_revision,
-            use_auth_token=True if model_args.use_auth_token else None,
-        )
+        model_constructor = IITRobertaForSequenceClassification
     elif "bert" in model_args.model_name_or_path:
-        model = IITBERTForSequenceClassification.from_pretrained(
-            model_args.model_name_or_path,
-            from_tf=bool(".ckpt" in model_args.model_name_or_path),
-            config=config,
-            cache_dir=model_args.cache_dir,
-            revision=model_args.model_revision,
-            use_auth_token=True if model_args.use_auth_token else None,
-        )
+        model_constructor = IITBERTForSequenceClassification
     else:
         raise ValueError(
             "Only support RoBERTa models and BERT models.")
-    
+    model = model_constructor.from_pretrained(
+            model_args.model_name_or_path,
+            from_tf=bool(".ckpt" in model_args.model_name_or_path),
+            config=config,
+            cache_dir=model_args.cache_dir,
+            revision=model_args.model_revision,
+            use_auth_token=True if model_args.use_auth_token else None,
+    )
+
     low_level_model = InterventionableIITTransformerForSequenceClassification(
         model=model,
         all_layers=model_args.all_layers
     )
-    high_level_model = InterventionableAbstractionModelForABSA(
-        model=AbstractionModelForABSA(
-            model_type=model_args.high_level_model_type,
-        ),
-    )
+    
+    if "bert" in model_args.high_level_model_type_or_path:
+        if "roberta" in model_args.high_level_model_type_or_path:
+            model_constructor = IITRobertaForSequenceClassification
+        elif "bert" in model_args.high_level_model_type_or_path:
+            model_constructor = IITBERTForSequenceClassification
+        else:
+            raise ValueError(
+                "Only support RoBERTa models and BERT models.")
+        high_level_model = model_constructor.from_pretrained(
+                model_args.high_level_model_type_or_path,
+                from_tf=bool(".ckpt" in model_args.high_level_model_type_or_path),
+                config=config,
+                cache_dir=model_args.cache_dir,
+                revision=model_args.model_revision,
+                use_auth_token=True if model_args.use_auth_token else None,
+        )
+        high_level_model = InterventionableIITTransformerForSequenceClassification(
+            model=high_level_model,
+            all_layers=model_args.all_layers
+        )
+    else:
+        high_level_model = InterventionableAbstractionModelForABSA(
+            model=AbstractionModelForABSA(
+                model_type=model_args.high_level_model_type_or_path,
+            ),
+        )
     
     # Preprocessing the raw_datasets
     if data_args.task_name is not None:
@@ -405,7 +441,7 @@ def main():
     else:
         # Again, we try to have some nice defaults but don't hesitate to tweak to your use case.
         non_label_column_names = [
-            name for name in raw_datasets["train"].column_names if name != "label"]
+            name for name in raw_datasets["train"].column_names if name != label_key]
         if "sentence1" in non_label_column_names and "sentence2" in non_label_column_names:
             sentence1_key, sentence2_key = "sentence1", "sentence2"
         else:
@@ -472,9 +508,9 @@ def main():
                            max_length=max_seq_length, truncation=True)
 
         # Map labels to IDs (not necessary for GLUE tasks)
-        if label_to_id is not None and "label" in examples:
-            result["label"] = [(label_to_id[l] if l != -1 else -1)
-                               for l in examples["label"]]
+        if label_to_id is not None and label_key in examples:
+            result[label_key] = [(label_to_id[l] if l != -1 else -1)
+                               for l in examples[label_key]]
         return result
         
     with training_args.main_process_first(desc="dataset map pre-processing"):
@@ -526,10 +562,10 @@ def main():
         device=device,
         alpha=model_args.alpha,
         beta=model_args.beta,
-        gemma=model_args.gemma,
         wandb_metadata=model_args.wandb_metadata,
         eval_exclude_neutral=model_args.eval_exclude_neutral,
-        high_level_model_type=model_args.high_level_model_type,
+        high_level_model_type=model_args.high_level_model_type_or_path,
+        mode=model_args.mode,
     )
     
     if training_args.do_train:
