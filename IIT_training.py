@@ -41,9 +41,9 @@ from IITTrainer import *
 # Will error if the minimal version of Transformers is not installed. Remove at your own risks.
 task_to_keys = {
     "opentable": ("text", None),
-    "CEBaB": ("description", None),
+    "cebab": ("text", None),
 }
-label_key = "review_majority"
+label_key = "label"
 
 import logging
 logger = logging.getLogger(__name__)
@@ -342,7 +342,8 @@ def main():
     if data_args.dataset_name is not None and not os.path.isdir(data_args.dataset_name):
         raw_datasets = load_dataset(
             data_args.dataset_name,
-            cache_dir="../huggingface_cache/"
+            cache_dir="../huggingface_cache/",
+            use_auth_token=True, # we may delete this!
         )
     # we should keep using this later, as we want to use the HF dataset!
     elif data_args.dataset_name is not None and os.path.isdir(data_args.dataset_name):
@@ -354,7 +355,7 @@ def main():
             "Need a huggingface datasets formatted directory for `dataset_name`.")
     
     # we need to filter labels in the train: excluding the no majority cases
-    raw_datasets["train"] = raw_datasets["train"].filter(lambda example: example[label_key]!="no majority")
+    # raw_datasets["train"] = raw_datasets["train"].filter(lambda example: example[label_key]!="no majority")
     
     label_list = sorted(list(set(raw_datasets["train"][label_key]).union(
         set(raw_datasets["validation"][label_key]))))

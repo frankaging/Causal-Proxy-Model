@@ -53,6 +53,7 @@ class ABSAIITTrainer:
     ):
         self.args = args
         self.train_dataset = train_dataset
+        self.query_dataset = self.train_dataset.data.to_pandas()
         self.eval_dataset = eval_dataset
         self.low_level_model = low_level_model
         self.high_level_model = high_level_model
@@ -219,11 +220,59 @@ class ABSAIITTrainer:
         source_labels = source_labels[_sort_index]
         source_aspect_labels = source_aspect_labels[_sort_index]
         
-        counterfactual_input_ids = input_ids.clone()
-        counterfactual_attention_mask = attention_mask.clone()
+        base_intervention_mask, source_intervention_mask, \
+            base_intervention_corr, source_intervention_corr = self._get_interchange_mask(
+            aspect_labels, source_aspect_labels
+        )
         
-        return input_ids, attention_mask, labels, aspect_labels.float(), \
-            source_input_ids, source_attention_mask, source_labels, source_aspect_labels.float(), \
+        #########
+        # Counterfactual lookup!
+        counterfactual_aspect_labels = aspect_labels.clone()
+        counterfactual_aspect_labels[base_intervention_mask] = \
+            source_aspect_labels[source_intervention_mask]
+        
+        counterfactual_input_ids = []
+        counterfactual_attention_mask = []
+        for i in range(0, counterfactual_aspect_labels.shape[0]):
+            satisfied_rows = self.query_dataset[
+                (self.query_dataset["ambiance_label"]==int(counterfactual_aspect_labels[i,0]))&
+                (self.query_dataset["food_label"]==int(counterfactual_aspect_labels[i,1]))&
+                (self.query_dataset["noise_label"]==int(counterfactual_aspect_labels[i,2]))&
+                (self.query_dataset["service_label"]==int(counterfactual_aspect_labels[i,3]))
+            ]
+            if len(satisfied_rows) > 0:
+                sampled_counterfactual = satisfied_rows.sample().iloc[0]
+                counterfactual_input_ids += [sampled_counterfactual["input_ids"]]
+                counterfactual_attention_mask += [sampled_counterfactual["attention_mask"]]
+            else:
+                base_intervention_corr[i] = -1
+                counterfactual_input_ids += [input_ids[i].tolist()]
+                counterfactual_attention_mask += [attention_mask[i].tolist()]
+        # Lookup examples based on these aspect ratings, and select one!
+        counterfactual_input_ids = torch.tensor(counterfactual_input_ids).long()
+        counterfactual_attention_mask = torch.tensor(counterfactual_attention_mask).long()
+        #########
+        
+        # send all data to gpus.
+        base_labels = labels.to(self.device)
+        base_aspect_labels = aspect_labels.float().to(self.device)
+        base_input_ids = input_ids.to(self.device)
+        base_attention_mask = attention_mask.to(self.device)
+        
+        source_labels = source_labels.to(self.device)
+        source_aspect_labels = source_aspect_labels.float().to(self.device)
+        source_input_ids = source_input_ids.to(self.device)
+        source_attention_mask = source_attention_mask.to(self.device)
+        
+        base_intervention_corr = base_intervention_corr.to(self.device)
+        source_intervention_corr = source_intervention_corr.to(self.device)
+
+        counterfactual_input_ids = counterfactual_input_ids.to(self.device)
+        counterfactual_attention_mask = counterfactual_attention_mask.to(self.device)
+        
+        return base_input_ids, base_attention_mask, base_labels, base_aspect_labels, \
+            source_input_ids, source_attention_mask, source_labels, source_aspect_labels, \
+            base_intervention_mask, source_intervention_mask, base_intervention_corr, source_intervention_corr, \
             counterfactual_input_ids, counterfactual_attention_mask
     
     def _calculate_metrics(
@@ -294,30 +343,12 @@ class ABSAIITTrainer:
                     base_labels, base_aspect_labels, \
                     source_input_ids, source_attention_mask, \
                     source_labels, source_aspect_labels, \
+                    base_intervention_mask, source_intervention_mask, base_intervention_corr, source_intervention_corr, \
                     counterfactual_input_ids, counterfactual_attention_mask = \
                 self.prepare_batch(
                     *(input_ids, attention_mask, labels, aspect_labels)
                 )
-                
-                base_intervention_mask, source_intervention_mask, \
-                    base_intervention_corr, source_intervention_corr = self._get_interchange_mask(
-                    base_aspect_labels, source_aspect_labels
-                )
-                
-                # send all data to gpus.
-                base_labels = base_labels.to(self.device)
-                source_labels = source_labels.to(self.device)
-                base_aspect_labels = base_aspect_labels.to(self.device)
-                source_aspect_labels = source_aspect_labels.to(self.device)
-                base_input_ids = base_input_ids.to(self.device)
-                base_attention_mask = base_attention_mask.to(self.device)
-                source_input_ids = source_input_ids.to(self.device)
-                source_attention_mask = source_attention_mask.to(self.device)
-                base_intervention_corr = base_intervention_corr.to(self.device)
-                source_intervention_corr = source_intervention_corr.to(self.device)
-                # optional.
-                counterfactual_input_ids = counterfactual_input_ids.to(self.device)
-                counterfactual_attention_mask = counterfactual_attention_mask.to(self.device)
+
                 input_bundle = (
                     base_labels,
                     source_labels,
@@ -650,28 +681,10 @@ class ABSAIITTrainer:
         base_labels, base_aspect_labels,
         source_input_ids, source_attention_mask, 
         source_labels, source_aspect_labels,
+        base_intervention_mask, source_intervention_mask, base_intervention_corr, source_intervention_corr,
         counterfactual_input_ids, counterfactual_attention_mask,
         skip_update_iter=False
     ):
-        base_intervention_mask, source_intervention_mask, \
-            base_intervention_corr, source_intervention_corr = self._get_interchange_mask(
-            base_aspect_labels, source_aspect_labels
-        )
-
-        # send all data to gpus.
-        base_labels = base_labels.to(self.device)
-        source_labels = source_labels.to(self.device)
-        base_aspect_labels = base_aspect_labels.to(self.device)
-        source_aspect_labels = source_aspect_labels.to(self.device)
-        base_input_ids = base_input_ids.to(self.device)
-        base_attention_mask = base_attention_mask.to(self.device)
-        source_input_ids = source_input_ids.to(self.device)
-        source_attention_mask = source_attention_mask.to(self.device)
-        base_intervention_corr = base_intervention_corr.to(self.device)
-        source_intervention_corr = source_intervention_corr.to(self.device)
-        # optional.
-        counterfactual_input_ids = counterfactual_input_ids.to(self.device)
-        counterfactual_attention_mask = counterfactual_attention_mask.to(self.device)
         input_bundle = (
             base_labels,
             source_labels,
@@ -752,28 +765,10 @@ class ABSAIITTrainer:
         base_labels, base_aspect_labels,
         source_input_ids, source_attention_mask, 
         source_labels, source_aspect_labels,
+        base_intervention_mask, source_intervention_mask, base_intervention_corr, source_intervention_corr,
         counterfactual_input_ids, counterfactual_attention_mask,
         skip_update_iter=False
     ):
-        base_intervention_mask, source_intervention_mask, \
-            base_intervention_corr, source_intervention_corr = self._get_interchange_mask(
-            base_aspect_labels, source_aspect_labels
-        )
-
-        # send all data to gpus.
-        base_labels = base_labels.to(self.device)
-        source_labels = source_labels.to(self.device)
-        base_aspect_labels = base_aspect_labels.to(self.device)
-        source_aspect_labels = source_aspect_labels.to(self.device)
-        base_input_ids = base_input_ids.to(self.device)
-        base_attention_mask = base_attention_mask.to(self.device)
-        source_input_ids = source_input_ids.to(self.device)
-        source_attention_mask = source_attention_mask.to(self.device)
-        base_intervention_corr = base_intervention_corr.to(self.device)
-        source_intervention_corr = source_intervention_corr.to(self.device)
-        # optional.
-        counterfactual_input_ids = counterfactual_input_ids.to(self.device)
-        counterfactual_attention_mask = counterfactual_attention_mask.to(self.device)
         input_bundle = (
             base_labels,
             source_labels,
@@ -890,6 +885,8 @@ class ABSAIITTrainer:
                 base_intervention_corr=None,
                 source_intervention_corr=None,
             )
+            assert counterfactual_input_ids != None
+            assert counterfactual_attention_mask != None
             # for BERT, we actually explicity feed through counterfactual inputs!
             counterfactual_labels, _, _ = self.high_level_model.forward(
                 base=(counterfactual_input_ids, counterfactual_attention_mask),
