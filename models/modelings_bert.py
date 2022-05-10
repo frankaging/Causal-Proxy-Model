@@ -1272,7 +1272,28 @@ class BertForPreTraining(BertPreTrainedModel):
             attentions=outputs.attentions,
         )
     
+class BertNonlinearClassificationHead(nn.Module):
+    """Head for sentence-level classification tasks. Identical to RobertaClassificationHead."""
 
+    def __init__(self, config):
+        super().__init__()
+        self.dense = nn.Linear(config.hidden_size, config.hidden_size)
+        classifier_dropout = (
+            config.classifier_dropout if config.classifier_dropout is not None else config.hidden_dropout_prob
+        )
+        self.dropout = nn.Dropout(classifier_dropout)
+        self.out_proj = nn.Linear(config.hidden_size, config.num_labels)
+
+    def forward(self, features, **kwargs):
+        x = features  # features is the pooled [CLS] token
+        x = self.dropout(x)
+        x = self.dense(x)
+        x = torch.tanh(x)
+        x = self.dropout(x)
+        x = self.out_proj(x)
+        return x
+
+    
 @add_start_docstrings(
     """
     Bert Model transformer with a sequence classification/regression head on top (a linear layer on top of the pooled
@@ -1294,7 +1315,7 @@ class IITBERTForSequenceClassification(BertPreTrainedModel):
             config.classifier_dropout if config.classifier_dropout is not None else config.hidden_dropout_prob
         )
         self.dropout = nn.Dropout(classifier_dropout)
-        self.classifier = nn.Linear(config.hidden_size, config.num_labels)
+        self.classifier = BertNonlinearClassificationHead(config)
         self.multitask_classifier = MultiTaskClassificationHead(
             config, num_aspect_labels
         )

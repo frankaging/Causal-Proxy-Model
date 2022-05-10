@@ -36,7 +36,7 @@ from transformers.utils.versions import require_version
 
 from models.modelings_roberta import *
 from models.modelings_bert import *
-from IITTrainer import *
+from ProxyTrainer import *
 
 # Will error if the minimal version of Transformers is not installed. Remove at your own risks.
 task_to_keys = {
