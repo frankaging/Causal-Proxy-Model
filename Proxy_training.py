@@ -201,10 +201,16 @@ class ModelArguments:
     alpha: float = field(
         default=0.0,
         metadata={
-            "help": "Loss coefficient for the multitask objective."}
+            "help": "Loss coefficient for the task objective."}
     )
         
     beta: float = field(
+        default=0.0,
+        metadata={
+            "help": "Loss coefficient for the multitask objective."}
+    )
+        
+    gemma: float = field(
         default=0.0,
         metadata={
             "help": "Loss coefficient for the IIT objective."}
@@ -283,11 +289,16 @@ def main():
     transformers.utils.logging.enable_default_handler()
     transformers.utils.logging.enable_explicit_format()
     
+    # we need to config stuffs based on the model name.
+    training_args.save_steps = 999999
+    
     # make the name shorter.
     # overwrite the output dir a little bit.
     high_type = "logistic_regression"
-    if "bert" in model_args.high_level_model_type_or_path:
-        high_type = "bert"
+    if "roberta-base" in model_args.high_level_model_type_or_path:
+        high_type = "roberta-base"
+    elif "bert-base-uncased" in model_args.high_level_model_type_or_path:
+        high_type = "bert-base-uncased"
     elif "voting" in model_args.high_level_model_type_or_path:
         high_type = "voting"
     data_dir_postfix = data_args.dataset_name.strip("/").split("/")[-1]
@@ -297,7 +308,7 @@ def main():
         train_dir = model_args.model_name_or_path.strip("/").split("/")[-1]
         sub_output_dir = f"{train_dir}.eval.{data_args.eval_split_name}.{data_dir_postfix}"
     if training_args.do_train:
-        sub_output_dir = f"{sub_output_dir}_seed_{training_args.seed}"
+        sub_output_dir = f"{sub_output_dir}.seed_{training_args.seed}"
         
     training_args.output_dir = os.path.join(
         training_args.output_dir, sub_output_dir)
@@ -522,6 +533,7 @@ def main():
             desc="Running tokenizer on dataset",
         )
     if training_args.do_train:
+        query_dataset = raw_datasets[data_args.train_split_name]
         train_dataset = raw_datasets[data_args.train_split_name]
         if data_args.max_train_samples is not None:
             train_dataset = train_dataset.select(
@@ -559,10 +571,12 @@ def main():
         args=training_args,
         train_dataset=train_dataset if training_args.do_train else None,
         eval_dataset=eval_dataset if training_args.do_eval else None,
+        query_dataset=query_dataset,
         data_collator=data_collator,
         device=device,
         alpha=model_args.alpha,
         beta=model_args.beta,
+        gemma=model_args.gemma,
         wandb_metadata=model_args.wandb_metadata,
         eval_exclude_neutral=model_args.eval_exclude_neutral,
         high_level_model_type=model_args.high_level_model_type_or_path,

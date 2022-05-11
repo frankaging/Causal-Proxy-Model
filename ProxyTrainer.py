@@ -43,9 +43,10 @@ class ABSAIITTrainer:
         args, 
         train_dataset, 
         eval_dataset, 
+        query_dataset,
         data_collator,
         device,
-        alpha, beta,
+        alpha, beta, gemma,
         wandb_metadata,
         eval_exclude_neutral,
         high_level_model_type,
@@ -53,7 +54,7 @@ class ABSAIITTrainer:
     ):
         self.args = args
         self.train_dataset = train_dataset
-        self.query_dataset = self.train_dataset.data.to_pandas()
+        self.query_dataset = query_dataset.data.to_pandas()
         self.eval_dataset = eval_dataset
         self.low_level_model = low_level_model
         self.high_level_model = high_level_model
@@ -61,8 +62,8 @@ class ABSAIITTrainer:
         
         self.alpha = alpha
         self.beta = beta
-        self.curr_alpha = alpha
-        self.curr_beta = beta
+        self.gemma = gemma
+
         self.alpha_step = self.alpha/self.args.num_train_epochs
         self.beta_step = self.beta/self.args.num_train_epochs
         
@@ -266,7 +267,7 @@ class ABSAIITTrainer:
         
         base_intervention_corr = base_intervention_corr.to(self.device)
         source_intervention_corr = source_intervention_corr.to(self.device)
-
+        
         counterfactual_input_ids = counterfactual_input_ids.to(self.device)
         counterfactual_attention_mask = counterfactual_attention_mask.to(self.device)
         
@@ -406,8 +407,8 @@ class ABSAIITTrainer:
                     )
                 # loss: sum all losses together.
                 loss = seq_cls_loss + \
-                    self.curr_alpha * mul_cls_loss + \
-                    self.curr_beta * iit_cls_loss
+                    self.alpha * mul_cls_loss + \
+                    self.beta * iit_cls_loss
                 if self.args.n_gpu > 1:
                     loss = loss.mean()  # mean() to average on multi-gpu.
                     abstract_cls_loss = None # WARNING: we decide not to train our high level model
@@ -739,8 +740,8 @@ class ABSAIITTrainer:
             base_intervention_corr!=-1
         )
         loss = seq_cls_loss + \
-            self.curr_alpha * mul_cls_loss + \
-            self.curr_beta * iit_cls_loss
+            self.alpha * mul_cls_loss + \
+            self.beta * iit_cls_loss
         if self.args.n_gpu > 1:
             loss = loss.mean()  # mean() to average on multi-gpu.
             abstract_cls_loss = None # WARNING: we decide not to train our high level model
@@ -811,9 +812,9 @@ class ABSAIITTrainer:
             counterfactual_outputs["logits"][0], counterfactual_labels["logits"][0], 
             loss_mask=base_intervention_corr!=-1
         )
-        loss = seq_cls_loss + \
-            self.curr_alpha * mul_cls_loss + \
-            self.curr_beta * iit_cls_loss
+        loss = self.alpha * seq_cls_loss + \
+            self.beta * mul_cls_loss + \
+            self.gemma * iit_cls_loss
         if self.args.n_gpu > 1:
             loss = loss.mean()  # mean() to average on multi-gpu.
             abstract_cls_loss = None # WARNING: we decide not to train our high level model
@@ -1007,9 +1008,6 @@ class ABSAIITTrainer:
         self.accumulated_mul_cls_count = 0
         self.accumulated_iit_cls_count = 0
         self.accumulated_abstract_cls_count = 0
-        
-        self.curr_alpha = self.alpha
-        self.curr_beta = self.beta
     
     def save_checkpoint(self):
         try:
