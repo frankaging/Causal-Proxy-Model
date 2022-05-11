@@ -440,10 +440,16 @@ class ABSAIITTrainer:
         eval_loss = accumulated_loss / n_sequences_epoch
         eval_seq_cls_loss = accumulated_seq_cls_loss / n_sequences_epoch
         eval_mul_cls_loss = accumulated_mul_cls_loss / n_effective_aspect_sequence_epoch
-        eval_iit_cls_loss = accumulated_iit_cls_loss / n_effective_iit_sequence_epoch
+        if n_effective_iit_sequence_epoch == 0:
+            eval_iit_cls_loss = 0
+        else:
+            eval_iit_cls_loss = accumulated_iit_cls_loss / n_effective_iit_sequence_epoch
         eval_seq_cls_acc = accumulated_seq_cls_count / n_sequences_epoch
         eval_mul_cls_acc = accumulated_mul_cls_count / n_effective_aspect_sequence_epoch
-        eval_iit_cls_acc = accumulated_iit_cls_count / n_effective_iit_sequence_epoch
+        if n_effective_iit_sequence_epoch == 0:
+            eval_iit_cls_acc = 0
+        else:
+            eval_iit_cls_acc = accumulated_iit_cls_count / n_effective_iit_sequence_epoch
         
         # metrics.
         seq_cls_eval_metrics = self._calculate_metrics(
@@ -541,6 +547,7 @@ class ABSAIITTrainer:
     ):
         intervention_mask = torch.zeros_like(base_aspect_labels).bool()
         intervention_corr = []
+        
         for i in range(0, base_aspect_labels.shape[0]):
             nonzero_indices = (
                 (base_aspect_labels[i]!=-1)&(source_aspect_labels[i]!=-1)
@@ -551,6 +558,7 @@ class ABSAIITTrainer:
                 intervention_mask[i, chosen_index] = True
             else:
                 intervention_corr += [-1]
+
         return intervention_mask, intervention_mask, \
             torch.tensor(intervention_corr), torch.tensor(intervention_corr)
     
@@ -645,7 +653,10 @@ class ABSAIITTrainer:
         
         self.last_seq_cls_acc = seq_cls_count*1.0/n_sample
         self.last_mul_cls_acc = mul_cls_count*1.0/n_effective_aspect_sequence
-        self.last_iit_cls_acc = iit_cls_count*1.0/n_effective_iit_sequence
+        if n_effective_iit_sequence == 0:
+            self.last_iit_cls_acc = 0
+        else:
+            self.last_iit_cls_acc = iit_cls_count*1.0/n_effective_iit_sequence
         
         self.last_effective_intervention = n_effective_iit_sequence*1.0/n_sample
         self.last_low_label_shifts_count = low_label_shifts_count*1.0/n_sample
@@ -671,10 +682,16 @@ class ABSAIITTrainer:
         self.averaged_loss = self.accumulated_loss / self.n_sequences_epoch
         self.averaged_seq_cls_loss = self.accumulated_seq_cls_loss / self.n_sequences_epoch
         self.averaged_mul_cls_loss = self.accumulated_mul_cls_loss / self.n_effective_aspect_sequence_epoch
-        self.averaged_iit_cls_loss = self.accumulated_iit_cls_loss / self.n_effective_iit_sequence_epoch
+        if self.n_effective_iit_sequence_epoch == 0:
+            self.averaged_iit_cls_loss = 0
+        else:
+            self.averaged_iit_cls_loss = self.accumulated_iit_cls_loss / self.n_effective_iit_sequence_epoch
         self.averaged_seq_cls_acc = self.accumulated_seq_cls_count / self.n_sequences_epoch
         self.averaged_mul_cls_acc = self.accumulated_mul_cls_count / self.n_effective_aspect_sequence_epoch
-        self.averaged_iit_cls_acc = self.accumulated_iit_cls_count / self.n_effective_iit_sequence_epoch
+        if self.n_effective_iit_sequence_epoch == 0:
+            self.averaged_iit_cls_acc = 0
+        else:
+            self.averaged_iit_cls_acc = self.accumulated_iit_cls_count / self.n_effective_iit_sequence_epoch
     
     def _step_iit(
         self,
