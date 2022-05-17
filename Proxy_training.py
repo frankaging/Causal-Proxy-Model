@@ -303,7 +303,7 @@ def main():
         high_type = "voting"
     data_dir_postfix = data_args.dataset_name.strip("/").split("/")[-1]
     if training_args.do_train:
-        sub_output_dir = f"{data_args.task_name}.train.{data_args.train_split_name}"                         f".alpha.{model_args.alpha}.beta.{model_args.beta}"                         f".dim.{model_args.intervention_h_dim}"                         f".hightype.{high_type}.{data_dir_postfix}"                         f".mode.{model_args.mode}"
+        sub_output_dir = f"{data_args.task_name}.train.{data_args.train_split_name}"                         f".alpha.{model_args.alpha}.beta.{model_args.beta}.gemma.{model_args.gemma}"                         f".dim.{model_args.intervention_h_dim}"                         f".hightype.{high_type}.{data_dir_postfix}"                         f".mode.{model_args.mode}"
     elif training_args.do_eval:
         train_dir = model_args.model_name_or_path.strip("/").split("/")[-1]
         sub_output_dir = f"{train_dir}.eval.{data_args.eval_split_name}.{data_dir_postfix}"
