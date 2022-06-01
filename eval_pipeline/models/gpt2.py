@@ -7,12 +7,12 @@ from transformers import (
     AutoTokenizer,
 )
 
-from eval_pipeline.models.abstract_model import Model
 from eval_pipeline.customized_models.gpt2 import GPT2ForNonlinearSequenceClassification
+from eval_pipeline.models.abstract_model import Model
 
 
 class GPT2ForCEBaB(Model):
-    def __init__(self, model_path, device='cpu', batch_size=64):
+    def __init__(self, model_path, device='cpu', batch_size=32):
         self.device = device
         self.model_path = model_path
         self.tokenizer_path = model_path
@@ -60,3 +60,15 @@ class GPT2ForCEBaB(Model):
         clf_report = classification_report(y.to_numpy(), predictions, output_dict=True)
 
         return probas, clf_report
+
+    def get_embeddings(self, sentences_list):
+        x = self.tokenizer(sentences_list, padding=True, truncation=True, return_tensors='pt')
+        embeddings = []
+        for i in range(ceil(len(x['input_ids']) / self.batch_size)):
+            x_batch = {k: v[i * self.batch_size:(i + 1) * self.batch_size].to(self.device) for k, v in x.items()}
+            embeddings.append(self.model.transformer(**x_batch).last_hidden_state[:, 0, :].detach().cpu().tolist())
+
+        return embeddings
+
+    def get_classification_head(self):
+        return self.model.score

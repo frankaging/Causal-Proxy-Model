@@ -1,5 +1,7 @@
 from abc import ABC, abstractmethod
 
+import numpy as np
+
 
 class Explainer(ABC):
     def __str__(self):
@@ -10,13 +12,17 @@ class Explainer(ABC):
         pass
 
     @abstractmethod
-    def predict_proba(self, pairs):
+    def estimate_icace(self, pairs):
         pass
 
 
-class DummyExplainer(Explainer):
+class ZeroExplainer(Explainer):
     def fit(self, dataset, classifier_predictions, classifier, dev_dataset=None):
         pass
 
-    def predict_proba(self, pairs):
-        return [[1., 0.]] * len(pairs)
+    def estimate_icace(self, pairs):
+        # get the number of classes to predict for
+        N = pairs['review_majority_base'].iloc[0].shape[0]
+        L = len(pairs)
+
+        return list(np.zeros((L, N)))

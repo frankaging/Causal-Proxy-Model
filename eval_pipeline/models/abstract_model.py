@@ -13,8 +13,32 @@ class Model(ABC):
     def predict_proba(self, dataset):
         pass
 
+    @abstractmethod
+    def get_classification_head(self):
+        pass
+
+
+class ModelForCEBaB(Model, ABC):
+    def __str__(self):
+        return type(self).__name__
+
+    @abstractmethod
+    def fit(self, dataset):
+        pass
+
+    @abstractmethod
+    def predict_proba(self, dataset):
+        pass
+
+    @abstractmethod
+    def get_embeddings(self, dataset):
+        pass
+
 
 class DummyModel(Model):
+    def get_classification_head(self):
+        pass
+
     def fit(self, dataset):
         pass
 

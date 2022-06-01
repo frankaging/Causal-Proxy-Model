@@ -18,9 +18,6 @@ class CONEXP(Explainer):
             } for aspect in self.aspects
         }
 
-    def __str__(self):
-        return 'CONEXP'
-
     def fit(self, dataset, classifier_predictions, classifier, dev_dataset=None):
         # create a dataset with the predictions
         dataset_with_model_predictions = dataset
@@ -32,7 +29,7 @@ class CONEXP(Explainer):
                 filtered_dataset = dataset_with_model_predictions[dataset_with_model_predictions[f'{aspect}_aspect_majority'] == label]
                 self.conditional_expectations[aspect][label] = filtered_dataset.prediction.mean()
 
-    def predict_proba(self, pairs):
+    def estimate_icace(self, pairs):
         def conditional_difference(pair):
             intervention_type = pair['intervention_type']
             intervention_aspect_base = pair['intervention_aspect_base']

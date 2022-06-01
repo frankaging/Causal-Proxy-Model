@@ -1,4 +1,5 @@
 import numpy as np
+from scipy.spatial.distance import cosine
 
 
 def _calculate_ite(pairs):
@@ -23,12 +24,23 @@ def _calculate_icace(pairs):
 
 def _calculate_estimate_loss(pairs):
     """
-    Calculate the L2-loss between the ICaCE and EICaCE.
+    Calculate the distance between the ICaCE and EICaCE.
     """
-    pairs['ICaCE-error'] = pairs['ICaCE'] - pairs['EICaCE']
-    pairs['ICaCE-error'] = pairs['ICaCE-error'].apply(lambda x: np.linalg.norm(x, ord=2))
+
+    pairs['ICaCE-L2'] = pairs[['ICaCE', 'EICaCE']].apply(lambda x: np.linalg.norm(x[0] - x[1], ord=2), axis=1)
+    pairs['ICaCE-cosine'] = pairs[['ICaCE', 'EICaCE']].apply(lambda x: _cosine_distance(x[0], x[1]), axis=1)
+    pairs['ICaCE-normdiff'] = pairs[['ICaCE', 'EICaCE']].apply(lambda x: abs(np.linalg.norm(x[0], ord=2) - np.linalg.norm(x[1], ord=2)), axis=1)
 
     return pairs
+
+
+def _cosine_distance(a,b):
+    # cosine distance is not defined for zero vectors
+    # in this case, return the average distance
+    if np.linalg.norm(a, ord=2) == 0 or np.linalg.norm(b, ord=2) == 0:
+        return 1
+    else:
+        return cosine(a,b)
 
 
 def _aggregate_metrics(pairs, groupby, metrics):

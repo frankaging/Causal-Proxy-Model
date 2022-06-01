@@ -204,8 +204,8 @@ class LSTMModel(nn.Module):
             last_hidden_state=final_out,
             pooler_output=final_out,
         )
-    
-class LSTMForSequenceClassification(BertPreTrainedModel): # fake overhead loading.
+
+class LSTMForNonLinearSequenceClassification(BertPreTrainedModel): # fake overhead loading.
     def __init__(self, config):
         super().__init__(config)
         self.num_labels = config.num_labels

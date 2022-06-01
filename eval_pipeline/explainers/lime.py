@@ -49,9 +49,6 @@ class LIME(Explainer):
         self.y_train = None
         self.x_dev = None
 
-    def __str__(self):
-        return 'LIME'
-
     def fit(self, dataset, classifier_predictions, classifier, dev_dataset=None):
         # store representations and corresponding model predictions
         self.x_train = dataset_aspects_to_onehot(dataset)
@@ -76,7 +73,8 @@ class LIME(Explainer):
 
         return distance
 
-    def _create_proximity_weight_matrix(self, distance_matrix):
+    @staticmethod
+    def _create_proximity_weight_matrix(distance_matrix):
         """
         Given a distance matrix, calculate the proximity scores based on an exponential kernel.
         """
@@ -84,7 +82,8 @@ class LIME(Explainer):
         proximity = np.exp(- distance_matrix ** 2 / sigma ** 2)
         return proximity
 
-    def _get_representations_after_interventions(self, pairs):
+    @staticmethod
+    def _get_representations_after_interventions(pairs):
         """
         Simulate interventions in the explainable representation space.
         """
@@ -102,7 +101,7 @@ class LIME(Explainer):
         self.x_dev = dataset_aspects_to_onehot(pairs.rename(columns=lambda col: col.replace('_base', '')))
 
         # apply the correct intervention in the representation space
-        counterf_dev = self._get_representations_after_interventions(pairs)
+        counterfactual_dev = self._get_representations_after_interventions(pairs)
 
         # get proximity matrix
         distance = self._create_distance_matrix()
@@ -120,7 +119,7 @@ class LIME(Explainer):
             sample_weights = proximity[i]
             lr = self.model.fit(self.x_train, y_train, lr__sample_weight=sample_weights)
 
-            counterfactual = counterf_dev[i]
+            counterfactual = counterfactual_dev[i]
             counterfactual_estimate = lr.predict_proba(counterfactual.reshape(1, -1))
             
             factual = self.x_dev[i]

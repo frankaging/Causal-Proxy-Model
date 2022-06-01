@@ -2,14 +2,13 @@ from math import ceil
 
 import numpy as np
 import torch
-from eval_pipeline.customized_models.lstm.lstm import LSTMForSequenceClassification
 from sklearn.metrics import classification_report
 from transformers import (
     AutoTokenizer,
 )
 
+from eval_pipeline.customized_models import LSTMForNonLinearSequenceClassification
 from eval_pipeline.models.abstract_model import Model
-
 
 
 class LSTMForCEBaB(Model):
@@ -19,7 +18,7 @@ class LSTMForCEBaB(Model):
         self.tokenizer_path = model_path
         self.batch_size = batch_size
 
-        self.model = LSTMForSequenceClassification.from_pretrained(self.model_path)
+        self.model = LSTMForNonLinearSequenceClassification.from_pretrained(self.model_path)
         self.tokenizer = AutoTokenizer.from_pretrained('bert-base-uncased')
 
         self.model.to(device)
@@ -55,3 +54,15 @@ class LSTMForCEBaB(Model):
         clf_report = classification_report(y.to_numpy(), predictions, output_dict=True)
 
         return probas, clf_report
+
+    def get_classification_head(self):
+        return self.model.classifier
+
+    def get_embeddings(self, sentences_list):
+        x = self.tokenizer(sentences_list, padding=True, truncation=True, return_tensors='pt')
+        embeddings = []
+        for i in range(ceil(len(x['input_ids']) / self.batch_size)):
+            x_batch = {k: v[i * self.batch_size:(i + 1) * self.batch_size].to(self.device) for k, v in x.items()}
+            embeddings.append(self.model.lstm(**x_batch, return_dict=True).pooler_output.detach().tolist())
+
+        return embeddings

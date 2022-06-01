@@ -2,6 +2,8 @@
 OVERALL_LABEL = 'review_majority'
 DESCRIPTION = 'description'
 TREATMENTS = ['food', 'ambiance', 'service', 'noise']
+NO_MAJORITY = 'no majority'
+ID_COL = 'id'
 
 # possible concept values
 POSITIVE = 'Positive'
@@ -27,3 +29,6 @@ ROBERTA = 'roberta-base'
 LSTM = 'lstm'
 
 MODELS = [BERT, T5, GPT2, ROBERTA, LSTM]
+
+# misc
+CEBAB = 'CEBaB'

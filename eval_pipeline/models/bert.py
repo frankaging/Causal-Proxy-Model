@@ -21,10 +21,7 @@ class BERTForCEBaB(Model):
         if 'CEBaB/' in self.model_path:
             self.tokenizer_path = self.model_path.split('/')[1].split('.')[0]
 
-        self.model = BertForNonlinearSequenceClassification.from_pretrained(
-            self.model_path,
-            cache_dir="../../../../huggingface_cache"
-        )
+        self.model = BertForNonlinearSequenceClassification.from_pretrained(self.model_path)
         self.tokenizer = AutoTokenizer.from_pretrained(self.tokenizer_path)
 
         self.model.to(device)
@@ -69,3 +66,6 @@ class BERTForCEBaB(Model):
             embeddings.append(self.model.base_model(**x_batch).pooler_output.detach().cpu().tolist())
 
         return embeddings
+
+    def get_classification_head(self):
+        return self.model.classifier
