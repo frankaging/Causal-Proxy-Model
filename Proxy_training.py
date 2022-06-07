@@ -10,6 +10,7 @@ import sys
 from dataclasses import dataclass, field
 from typing import Optional
 from functools import reduce
+import copy
 
 import datasets
 import numpy as np
@@ -216,6 +217,12 @@ class ModelArguments:
             "help": "Loss coefficient for the IIT objective."}
     )
 
+    classifier_dropout: float = field(
+        default=0.0,
+        metadata={
+            "help": "Whether to set dropout on the IIT classifier."}
+    ) 
+        
     wandb_metadata: str = field(
         default="go:IIT-ABSA",
         metadata={
@@ -406,10 +413,15 @@ def main():
     else:
         raise ValueError(
             "Only support RoBERTa models and BERT models.")
+    
+    low_level_config = copy.deepcopy(config)
+    # for the proxy model, we may need to disable
+    # the final dropout to maximize the causal abstraction.
+    low_level_config.classifier_dropout = model_args.classifier_dropout
     model = model_constructor.from_pretrained(
             model_args.model_name_or_path,
             from_tf=bool(".ckpt" in model_args.model_name_or_path),
-            config=config,
+            config=low_level_config,
             cache_dir=model_args.cache_dir,
             revision=model_args.model_revision,
             use_auth_token=True if model_args.use_auth_token else None,
@@ -565,7 +577,7 @@ def main():
         data_collator = None
     
     # Initialize our Trainer
-    trainer = ABSAIITTrainer(
+    trainer = CausalProxyModelTrainer(
         low_level_model=low_level_model,
         high_level_model=high_level_model,
         args=training_args,
@@ -589,8 +601,6 @@ def main():
     
     if training_args.do_eval:
         trainer.evaluate()
-    
-
 
 # In[ ]:
 
