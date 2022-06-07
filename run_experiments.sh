@@ -1,4 +1,4 @@
-for seed in 66 77 88 99; do # 42; do
+for seed in 42 66 77 88 99; do
     CUDA_VISIBLE_DEVICES=0,6,8,9 python Proxy_training.py \
     --tokenizer_name bert-base-uncased \
     --model_name_or_path ./saved_models/bert-base-uncased.opentable.CEBaB.sa.2-class.exclusive.seed_${seed}/ \
@@ -7,7 +7,6 @@ for seed in 66 77 88 99; do # 42; do
     --dataset_name ./datasets/Proxy.CEBaB.sa.2-class.exclusive \
     --do_train \
     --do_eval \
-    --mode align \
     --max_seq_length 128 \
     --per_device_train_batch_size 32 \
     --per_device_eval_batch_size 32 \
