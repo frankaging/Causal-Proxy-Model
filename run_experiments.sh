@@ -1,5 +1,5 @@
 for seed in 42 66 77 88 99; do
-    CUDA_VISIBLE_DEVICES=0,6,8,9 python Proxy_training.py \
+    CUDA_VISIBLE_DEVICES=3,4,8,9 python Proxy_training.py \
     --tokenizer_name bert-base-uncased \
     --model_name_or_path ./saved_models/bert-base-uncased.opentable.CEBaB.sa.2-class.exclusive.seed_${seed}/ \
     --high_level_model_type_or_path ./saved_models/bert-base-uncased.opentable.CEBaB.sa.2-class.exclusive.seed_${seed}/ \

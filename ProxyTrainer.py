@@ -63,7 +63,8 @@ class CausalProxyModelTrainer:
         self.alpha = alpha
         self.beta = beta
         self.gemma = gemma
-
+        self.gemma_cosine = gemma
+        
         self.alpha_step = self.alpha/self.args.num_train_epochs
         self.beta_step = self.beta/self.args.num_train_epochs
         
@@ -158,6 +159,7 @@ class CausalProxyModelTrainer:
             ) 
 
         self.ce_loss_fct = nn.KLDivLoss(reduction="batchmean")
+        self.cosine_loss_fct = nn.CosineEmbeddingLoss(reduction="mean")
             
         # last.
         self.total_loss_epoch = 0
@@ -557,6 +559,14 @@ class CausalProxyModelTrainer:
         return intervention_mask, intervention_mask, \
             torch.tensor(intervention_corr), torch.tensor(intervention_corr)
     
+    def _representation_matching_loss(
+        self,
+        pred_repr,
+        actual_repr,
+        loss_mask=None,
+    ):
+        pass
+    
     def _logits_matching_loss(
         self,
         pred_logits,
@@ -564,20 +574,26 @@ class CausalProxyModelTrainer:
         temperature=2.0,
         loss_mask=None,
     ):
-        loss_ce = (
+        matching_loss = (
             self.ce_loss_fct(
                 nn.functional.log_softmax(pred_logits / temperature, dim=-1),
                 nn.functional.softmax(actual_logits / temperature, dim=-1),
             )
             * (temperature) ** 2
         )
+        if self.gemma_cosine != 0:
+            matching_loss += self.cosine_loss_fct(
+                nn.functional.softmax(pred_logits, dim=-1),
+                nn.functional.softmax(actual_logits, dim=-1),
+                torch.ones(pred_logits.shape[0]).to(pred_logits.device)
+            )
         
         loss_mask = torch.ones(pred_logits.shape[0]).bool().to(self.device) if loss_mask == None else loss_mask
         pred_labels = pred_logits.data.max(1)[1].long()[loss_mask]
         actual_labels = actual_logits.data.max(1)[1].long()[loss_mask]
         correct_count = pred_labels.eq(actual_labels).sum().cpu().item()  
         
-        return loss_ce, correct_count
+        return matching_loss, correct_count
     
     def _abstract_classification_loss(
         self,
