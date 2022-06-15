@@ -222,7 +222,13 @@ class ModelArguments:
         metadata={
             "help": "Whether to set dropout on the IIT classifier."}
     ) 
-        
+     
+    encoder_dropout: float = field(
+        default=0.0,
+        metadata={
+            "help": "Whether to set dropout on the IIT classifier."}
+    ) 
+    
     wandb_metadata: str = field(
         default="go:IIT-ABSA",
         metadata={
@@ -310,7 +316,12 @@ def main():
         high_type = "voting"
     data_dir_postfix = data_args.dataset_name.strip("/").split("/")[-1]
     if training_args.do_train:
-        sub_output_dir = f"{data_args.task_name}.train.{data_args.train_split_name}"                         f".alpha.{model_args.alpha}.beta.{model_args.beta}.gemma.{model_args.gemma}"                         f".dim.{model_args.intervention_h_dim}"                         f".hightype.{high_type}.{data_dir_postfix}"                         f".mode.{model_args.mode}"
+        sub_output_dir = f"{data_args.task_name}.train.{data_args.train_split_name}"\
+                         f".alpha.{model_args.alpha}.beta.{model_args.beta}.gemma.{model_args.gemma}"\
+                         f".dim.{model_args.intervention_h_dim}"\
+                         f".hightype.{high_type}.{data_dir_postfix}"\
+                         f".mode.{model_args.mode}.cls.dropout.{model_args.classifier_dropout}"\
+                         f".enc.dropout.{model_args.encoder_dropout}"
     elif training_args.do_eval:
         train_dir = model_args.model_name_or_path.strip("/").split("/")[-1]
         sub_output_dir = f"{train_dir}.eval.{data_args.eval_split_name}.{data_dir_postfix}"
@@ -418,6 +429,8 @@ def main():
     # for the proxy model, we may need to disable
     # the final dropout to maximize the causal abstraction.
     low_level_config.classifier_dropout = model_args.classifier_dropout
+    low_level_config.hidden_dropout_prob = model_args.encoder_dropout
+    low_level_config.attention_probs_dropout_prob = model_args.encoder_dropout
     model = model_constructor.from_pretrained(
             model_args.model_name_or_path,
             from_tf=bool(".ckpt" in model_args.model_name_or_path),
