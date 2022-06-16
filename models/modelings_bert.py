@@ -724,13 +724,19 @@ class BertEncoder(nn.Module):
                     all_cross_attentions = all_cross_attentions + (layer_outputs[2],)
                     
             # INT_POINT: only the last layer!
-            if base_intervention_corr is not None and source_hidden_states and i == self.config.num_hidden_layers-1:
+            if base_intervention_corr is not None and source_hidden_states is not None and i == self.config.num_hidden_layers-1:
                 for b in range(0, hidden_states.shape[0]):
                     if base_intervention_corr[b] != -1:
                         start_idx = base_intervention_corr[b]*self.intervention_h_dim
                         end_idx = (base_intervention_corr[b]+1)*self.intervention_h_dim
-                        hidden_states[b][0][start_idx:end_idx] = \
-                            source_hidden_states[i+1][b][0][start_idx:end_idx]
+                        # we support where the pass in source_hidden_states
+                        # is a partial one only for the interchanging aspect.
+                        if hidden_states.shape[-1] != source_hidden_states.shape[-1]:
+                            hidden_states[b][0][start_idx:end_idx] = source_hidden_states[b]
+                            # hidden_states[b][0][start_idx:end_idx] += source_hidden_states[b]
+                        else:
+                            hidden_states[b][0][start_idx:end_idx] = \
+                                source_hidden_states[i+1][b][0][start_idx:end_idx]
 
         if output_hidden_states:
             all_hidden_states = all_hidden_states + (hidden_states,)
@@ -1346,6 +1352,7 @@ class IITBERTForSequenceClassification(BertPreTrainedModel):
         base_intervention_corr=None,
         source_intervention_corr=None,
         all_layers=None,
+        cls_hidden_reprs=None,
         # counterfactual arguments
         output_attentions: Optional[bool] = None,
         output_hidden_states: Optional[bool] = None,
@@ -1359,30 +1366,33 @@ class IITBERTForSequenceClassification(BertPreTrainedModel):
         """
         return_dict = return_dict if return_dict is not None else self.config.use_return_dict
 
-        outputs = self.bert(
-            input_ids,
-            attention_mask=attention_mask,
-            token_type_ids=token_type_ids,
-            position_ids=position_ids,
-            head_mask=head_mask,
-            inputs_embeds=inputs_embeds,
-            # counterfactual arguments
-            source_hidden_states=source_hidden_states,
-            base_intervention_corr=base_intervention_corr,
-            source_intervention_corr=source_intervention_corr,
-            all_layers=all_layers,
-            # counterfactual arguments
-            output_attentions=output_attentions,
-            output_hidden_states=output_hidden_states,
-            return_dict=return_dict,
-        )
-
-        pooled_output = outputs[1]
+        if cls_hidden_reprs:
+            pooled_output = cls_hidden_reprs # we use this pre-calculated hidden representation.
+            
+        else:
+            outputs = self.bert(
+                input_ids,
+                attention_mask=attention_mask,
+                token_type_ids=token_type_ids,
+                position_ids=position_ids,
+                head_mask=head_mask,
+                inputs_embeds=inputs_embeds,
+                # counterfactual arguments
+                source_hidden_states=source_hidden_states,
+                base_intervention_corr=base_intervention_corr,
+                source_intervention_corr=source_intervention_corr,
+                all_layers=all_layers,
+                # counterfactual arguments
+                output_attentions=output_attentions,
+                output_hidden_states=output_hidden_states,
+                return_dict=return_dict,
+            )
+            pooled_output = outputs[1]
 
         pooled_output = self.dropout(pooled_output)
         logits = self.classifier(pooled_output)
 
-        mul_pooled_output = outputs[1]
+        mul_pooled_output = pooled_output
         
         mul_logits_0 = self.multitask_classifier(mul_pooled_output[:,:self.intervention_h_dim])
         mul_logits_1 = self.multitask_classifier(mul_pooled_output[:,self.intervention_h_dim:self.intervention_h_dim*2])
@@ -1412,14 +1422,17 @@ class IITBERTForSequenceClassification(BertPreTrainedModel):
                 loss_fct = BCEWithLogitsLoss()
                 loss = loss_fct(logits, labels)
         if not return_dict:
-            output = (logits,) + outputs[2:]
+            if cls_hidden_reprs:
+                output = (logits,)
+            else:
+                output = (logits,) + outputs[2:]
             return ((loss,) + output) if loss is not None else output
 
         return SequenceClassifierOutput(
             loss=loss,
             logits=(logits, mul_logits_0, mul_logits_1, mul_logits_2, mul_logits_3),
-            hidden_states=outputs.hidden_states,
-            attentions=outputs.attentions,
+            hidden_states=None if cls_hidden_reprs else outputs.hidden_states,
+            attentions=None if cls_hidden_reprs else outputs.attentions,
         )
     
 class InterventionableIITTransformerForSequenceClassification():
@@ -1432,7 +1445,38 @@ class InterventionableIITTransformerForSequenceClassification():
         self.model = model
         self.all_layers = all_layers
         self.multitask = multitask
+    
+    def forward_with_cls_hidden_reprs(
+        self,
+        cls_hidden_reprs,
+    ):
+        _outputs = self.model(
+            cls_hidden_reprs=cls_hidden_reprs,
+        )
+        return _outputs, None, None
+    
+    def forward_with_hook(
+        self,
+        base,
+        source_hidden_reprs,
+        base_intervention_corr,
+        source_intervention_corr,
+    ):
+        base_outputs, source_outputs, counterfactual_outputs = None, None, None
         
+        (base_input_ids, base_attention_mask) = base
+        counterfactual_outputs = self.model(
+            input_ids=base_input_ids,
+            attention_mask=base_attention_mask,
+            # counterfactual arguments
+            source_hidden_states=source_hidden_reprs,
+            base_intervention_corr=base_intervention_corr,
+            source_intervention_corr=source_intervention_corr,
+            all_layers=False,
+        )
+        
+        return base_outputs, source_outputs, counterfactual_outputs
+    
     def forward(
         self,
         base, source,
