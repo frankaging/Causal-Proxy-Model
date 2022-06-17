@@ -731,7 +731,7 @@ class BertEncoder(nn.Module):
                         end_idx = (base_intervention_corr[b]+1)*self.intervention_h_dim
                         # we support where the pass in source_hidden_states
                         # is a partial one only for the interchanging aspect.
-                        if hidden_states.shape[-1] != source_hidden_states.shape[-1]:
+                        if not isinstance(source_hidden_states, tuple) and hidden_states.shape[-1] != source_hidden_states.shape[-1]:
                             hidden_states[b][0][start_idx:end_idx] = source_hidden_states[b]
                             # hidden_states[b][0][start_idx:end_idx] += source_hidden_states[b]
                         else:
@@ -1387,17 +1387,16 @@ class IITBERTForSequenceClassification(BertPreTrainedModel):
                 output_hidden_states=output_hidden_states,
                 return_dict=return_dict,
             )
-            pooled_output = outputs[1]
+            pooled_output = outputs.pooler_output
 
         pooled_output = self.dropout(pooled_output)
         logits = self.classifier(pooled_output)
-
-        mul_pooled_output = pooled_output
         
-        mul_logits_0 = self.multitask_classifier(mul_pooled_output[:,:self.intervention_h_dim])
-        mul_logits_1 = self.multitask_classifier(mul_pooled_output[:,self.intervention_h_dim:self.intervention_h_dim*2])
-        mul_logits_2 = self.multitask_classifier(mul_pooled_output[:,self.intervention_h_dim*2:self.intervention_h_dim*3])
-        mul_logits_3 = self.multitask_classifier(mul_pooled_output[:,self.intervention_h_dim*3:self.intervention_h_dim*4])
+        before_pooled_output = outputs[0][:, 0]
+        mul_logits_0 = self.multitask_classifier(before_pooled_output[:,:self.intervention_h_dim])
+        mul_logits_1 = self.multitask_classifier(before_pooled_output[:,self.intervention_h_dim:self.intervention_h_dim*2])
+        mul_logits_2 = self.multitask_classifier(before_pooled_output[:,self.intervention_h_dim*2:self.intervention_h_dim*3])
+        mul_logits_3 = self.multitask_classifier(before_pooled_output[:,self.intervention_h_dim*3:self.intervention_h_dim*4])
         
         loss = None
         if labels is not None:
