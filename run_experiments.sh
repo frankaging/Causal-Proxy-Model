@@ -1,4 +1,4 @@
-for h_dim in 192; do # 4 16 32 64; do
+for h_dim in 4 16 32 64; do # 192; do
     for class_num in 2 3 5; do
         for seed in 42; do
             CUDA_VISIBLE_DEVICES=0,6,8,9 python Proxy_training.py \

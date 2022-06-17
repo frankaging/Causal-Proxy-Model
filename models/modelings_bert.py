@@ -1369,6 +1369,7 @@ class IITBERTForSequenceClassification(BertPreTrainedModel):
         if cls_hidden_reprs is not None:
             # we also need to all the pooler once if configured.
             pooled_output = self.bert.pooler(cls_hidden_reprs) if self.bert.pooler is not None else None
+            before_pooled_output = cls_hidden_reprs[:, 0]
         else:
             outputs = self.bert(
                 input_ids,
@@ -1388,11 +1389,11 @@ class IITBERTForSequenceClassification(BertPreTrainedModel):
                 return_dict=return_dict,
             )
             pooled_output = outputs.pooler_output
+            before_pooled_output = outputs[0][:, 0]
 
         pooled_output = self.dropout(pooled_output)
         logits = self.classifier(pooled_output)
         
-        before_pooled_output = outputs[0][:, 0]
         mul_logits_0 = self.multitask_classifier(before_pooled_output[:,:self.intervention_h_dim])
         mul_logits_1 = self.multitask_classifier(before_pooled_output[:,self.intervention_h_dim:self.intervention_h_dim*2])
         mul_logits_2 = self.multitask_classifier(before_pooled_output[:,self.intervention_h_dim*2:self.intervention_h_dim*3])
