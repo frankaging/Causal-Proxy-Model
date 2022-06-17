@@ -1366,9 +1366,9 @@ class IITBERTForSequenceClassification(BertPreTrainedModel):
         """
         return_dict = return_dict if return_dict is not None else self.config.use_return_dict
 
-        if cls_hidden_reprs:
-            pooled_output = cls_hidden_reprs # we use this pre-calculated hidden representation.
-            
+        if cls_hidden_reprs is not None:
+            # we also need to all the pooler once if configured.
+            pooled_output = self.bert.pooler(cls_hidden_reprs) if self.bert.pooler is not None else None
         else:
             outputs = self.bert(
                 input_ids,
@@ -1431,8 +1431,8 @@ class IITBERTForSequenceClassification(BertPreTrainedModel):
         return SequenceClassifierOutput(
             loss=loss,
             logits=(logits, mul_logits_0, mul_logits_1, mul_logits_2, mul_logits_3),
-            hidden_states=None if cls_hidden_reprs else outputs.hidden_states,
-            attentions=None if cls_hidden_reprs else outputs.attentions,
+            hidden_states=None if cls_hidden_reprs is not None else outputs.hidden_states,
+            attentions=None if cls_hidden_reprs is not None else outputs.attentions,
         )
     
 class InterventionableIITTransformerForSequenceClassification():
@@ -1449,9 +1449,11 @@ class InterventionableIITTransformerForSequenceClassification():
     def forward_with_cls_hidden_reprs(
         self,
         cls_hidden_reprs,
+        output_hidden_states=True,
     ):
         _outputs = self.model(
             cls_hidden_reprs=cls_hidden_reprs,
+            output_hidden_states=output_hidden_states,
         )
         return _outputs, None, None
     
