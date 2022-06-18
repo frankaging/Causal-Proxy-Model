@@ -1,6 +1,6 @@
-for h_dim in 128; do # 4 16 32 64; do
+for h_dim in 1 4 16 32 64 128; do # 1 4 16 32 64 128 192; do
     for class_num in 2 3 5; do
-        for seed in 42; do
+        for seed in 66 77 88 99; do
             CUDA_VISIBLE_DEVICES=0,6,8,9 python Proxy_training.py \
             --tokenizer_name bert-base-uncased \
             --model_name_or_path ./saved_models/bert-base-uncased.opentable.CEBaB.sa.${class_num}-class.exclusive.seed_${seed}/ \
@@ -25,16 +25,16 @@ for h_dim in 128; do # 4 16 32 64; do
             --gemma 3.0 \
             --overwrite_output_dir \
             --intervention_h_dim ${h_dim} \
-            --classifier_dropout 0.1 \
-            --encoder_dropout 0.1
+            --classifier_dropout 1.0 \
+            --encoder_dropout 1.0
         done
     done
 done
 
 # control!
-# for h_dim in 192; do # 4 16 32 64; do
+# for h_dim in 192; do # 1 4 16 32 64 192; do
 #     for class_num in 2 3 5; do
-#         for seed in 42; do
+#         for seed in 42 66 77 88 99; do
 #             CUDA_VISIBLE_DEVICES=0,6,8,9 python Proxy_training.py \
 #             --tokenizer_name bert-base-uncased \
 #             --model_name_or_path ./saved_models/bert-base-uncased.opentable.CEBaB.sa.${class_num}-class.exclusive.seed_${seed}/ \
@@ -59,8 +59,8 @@ done
 #             --gemma 0.0 \
 #             --overwrite_output_dir \
 #             --intervention_h_dim ${h_dim} \
-#             --classifier_dropout 0.1 \
-#             --encoder_dropout 0.1
+#             --classifier_dropout 1.0 \
+#             --encoder_dropout 1.0
 #         done
 #     done
 # done
