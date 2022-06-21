@@ -35,8 +35,10 @@ from transformers.trainer_utils import get_last_checkpoint
 from transformers.utils import check_min_version
 from transformers.utils.versions import require_version
 
-from models.modelings_roberta import *
 from models.modelings_bert import *
+from models.modelings_roberta import *
+from models.modelings_gpt2 import *
+from models.modelings_lstm import *
 from ProxyTrainer import *
 
 # Will error if the minimal version of Transformers is not installed. Remove at your own risks.
@@ -395,6 +397,10 @@ def main():
     #
     # In distributed training, the .from_pretrained methods guarantee that only one local process can concurrently
     # download model & vocab.
+    if "lstm" in model_args.model_name_or_path:
+        model_args.config_name = "bert-base-uncased"
+        model_args.tokenizer_name = "bert-base-uncased"
+    
     config = AutoConfig.from_pretrained(
         model_args.config_name if model_args.config_name else model_args.model_name_or_path,
         num_labels=num_labels,
@@ -421,9 +427,13 @@ def main():
         model_constructor = IITRobertaForSequenceClassification
     elif "bert" in model_args.model_name_or_path:
         model_constructor = IITBERTForSequenceClassification
+    elif "gpt" in model_args.model_name_or_path:
+        model_constructor = IITGPT2ForSequenceClassification
+    elif "lstm" in model_args.model_name_or_path:
+        model_constructor = IITLSTMForSequenceClassification
     else:
         raise ValueError(
-            "Only support RoBERTa models and BERT models.")
+            "Only support RoBERTa, BERT, GPT2 models.")
     
     low_level_config = copy.deepcopy(config)
     # for the proxy model, we may need to disable
@@ -431,28 +441,59 @@ def main():
     low_level_config.classifier_dropout = model_args.classifier_dropout
     low_level_config.hidden_dropout_prob = model_args.encoder_dropout
     low_level_config.attention_probs_dropout_prob = model_args.encoder_dropout
-    model = model_constructor.from_pretrained(
-            model_args.model_name_or_path,
-            from_tf=bool(".ckpt" in model_args.model_name_or_path),
-            config=low_level_config,
-            cache_dir=model_args.cache_dir,
-            revision=model_args.model_revision,
-            use_auth_token=True if model_args.use_auth_token else None,
-    )
-
+    
+    if "lstm" in model_args.model_name_or_path:
+        low_level_config.update_embeddings=False
+        low_level_config.bidirectional=True
+        low_level_config.num_hidden_layers=1
+        low_level_config.hidden_size=300
+        if os.path.isdir(model_args.model_name_or_path):
+            model = model_constructor.from_pretrained(
+                model_args.model_name_or_path,
+                from_tf=bool(".ckpt" in model_args.model_name_or_path),
+                config=low_level_config,
+                cache_dir=model_args.cache_dir,
+                revision=model_args.model_revision,
+                use_auth_token=True if model_args.use_auth_token else None,
+            )
+        else:
+            model = model_constructor(
+                config=config,
+            )
+            # load the preloaded embedding file.
+            fasttext_embeddings = torch.load("./models/embeddings.bin")
+            model.lstm.embeddings.word_embeddings.weight.data = fasttext_embeddings
+    else:
+        model = model_constructor.from_pretrained(
+                model_args.model_name_or_path,
+                from_tf=bool(".ckpt" in model_args.model_name_or_path),
+                config=low_level_config,
+                cache_dir=model_args.cache_dir,
+                revision=model_args.model_revision,
+                use_auth_token=True if model_args.use_auth_token else None,
+        )
+        # some post-editing for customized models.
+        if "gpt" in model_args.high_level_model_type_or_path:
+            # Define a padding token
+            tokenizer.pad_token = tokenizer.eos_token
+            model.config.pad_token_id = tokenizer.pad_token_id
+            
     low_level_model = InterventionableIITTransformerForSequenceClassification(
         model=model,
         all_layers=model_args.all_layers
     )
     
-    if "bert" in model_args.high_level_model_type_or_path:
+    if "bert" in model_args.high_level_model_type_or_path or \
+        "gpt" in model_args.high_level_model_type_or_path:
         if "roberta" in model_args.high_level_model_type_or_path:
             model_constructor = IITRobertaForSequenceClassification
         elif "bert" in model_args.high_level_model_type_or_path:
             model_constructor = IITBERTForSequenceClassification
+        elif "gpt" in model_args.high_level_model_type_or_path:
+            model_constructor = IITGPT2ForSequenceClassification
         else:
             raise ValueError(
-                "Only support RoBERTa models and BERT models.")
+                "Only support RoBERTa, BERT, GPT2 models.")
         high_level_model = model_constructor.from_pretrained(
                 model_args.high_level_model_type_or_path,
                 from_tf=bool(".ckpt" in model_args.high_level_model_type_or_path),
@@ -461,6 +502,36 @@ def main():
                 revision=model_args.model_revision,
                 use_auth_token=True if model_args.use_auth_token else None,
         )
+        # some post-editing for customized models.
+        if "gpt" in model_args.high_level_model_type_or_path:
+            # Define a padding token
+            high_level_model.config.pad_token_id = tokenizer.pad_token_id
+            
+        high_level_model = InterventionableIITTransformerForSequenceClassification(
+            model=high_level_model,
+            all_layers=model_args.all_layers
+        )
+    elif "lstm" in model_args.model_name_or_path:
+        config.update_embeddings=False
+        config.bidirectional=True
+        config.num_hidden_layers=1
+        config.hidden_size=300
+        if os.path.isdir(model_args.model_name_or_path):
+            high_level_model = IITLSTMForSequenceClassification.from_pretrained(
+                model_args.model_name_or_path,
+                from_tf=bool(".ckpt" in model_args.model_name_or_path),
+                config=config,
+                cache_dir=model_args.cache_dir,
+                revision=model_args.model_revision,
+                use_auth_token=True if model_args.use_auth_token else None,
+            )
+        else:
+            high_level_model = IITLSTMForSequenceClassification(
+                config=config,
+            )
+            # load the preloaded embedding file.
+            fasttext_embeddings = torch.load("./models/embeddings.bin")
+            high_level_model.lstm.embeddings.word_embeddings.weight.data = fasttext_embeddings
         high_level_model = InterventionableIITTransformerForSequenceClassification(
             model=high_level_model,
             all_layers=model_args.all_layers
@@ -625,4 +696,3 @@ def _mp_fn(index):
 
 if __name__ == "__main__":
     main()
-

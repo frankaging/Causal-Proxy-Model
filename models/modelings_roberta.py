@@ -675,15 +675,21 @@ class RobertaEncoder(nn.Module):
                 all_self_attentions = all_self_attentions + (layer_outputs[1],)
                 if self.config.add_cross_attention:
                     all_cross_attentions = all_cross_attentions + (layer_outputs[2],)
-                    
+                        
             # INT_POINT: only the last layer!
-            if base_intervention_corr is not None and source_hidden_states and i == self.config.num_hidden_layers-1:
+            if base_intervention_corr is not None and source_hidden_states is not None and i == self.config.num_hidden_layers-1:
                 for b in range(0, hidden_states.shape[0]):
                     if base_intervention_corr[b] != -1:
                         start_idx = base_intervention_corr[b]*self.intervention_h_dim
                         end_idx = (base_intervention_corr[b]+1)*self.intervention_h_dim
-                        hidden_states[b][0][start_idx:end_idx] = \
-                            source_hidden_states[i+1][b][0][start_idx:end_idx]
+                        # we support where the pass in source_hidden_states
+                        # is a partial one only for the interchanging aspect.
+                        if not isinstance(source_hidden_states, tuple) and hidden_states.shape[-1] != source_hidden_states.shape[-1]:
+                            hidden_states[b][0][start_idx:end_idx] = source_hidden_states[b]
+                            # hidden_states[b][0][start_idx:end_idx] += source_hidden_states[b]
+                        else:
+                            hidden_states[b][0][start_idx:end_idx] = \
+                                source_hidden_states[i+1][b][0][start_idx:end_idx]   
                         
         if output_hidden_states:
             all_hidden_states = all_hidden_states + (hidden_states,)
@@ -988,6 +994,7 @@ class IITRobertaForSequenceClassification(RobertaPreTrainedModel):
         base_intervention_corr=None,
         source_intervention_corr=None,
         all_layers=None,
+        cls_hidden_reprs=None,
         # counterfactual arguments
         output_attentions: Optional[bool] = None,
         output_hidden_states: Optional[bool] = None,
@@ -1001,28 +1008,33 @@ class IITRobertaForSequenceClassification(RobertaPreTrainedModel):
         """
         return_dict = return_dict if return_dict is not None else self.config.use_return_dict
 
-        outputs = self.roberta(
-            input_ids,
-            attention_mask=attention_mask,
-            token_type_ids=token_type_ids,
-            position_ids=position_ids,
-            head_mask=head_mask,
-            inputs_embeds=inputs_embeds,
-            # counterfactual arguments
-            source_hidden_states=source_hidden_states,
-            base_intervention_corr=base_intervention_corr,
-            source_intervention_corr=source_intervention_corr,
-            all_layers=all_layers,
-            # counterfactual arguments
-            output_attentions=output_attentions,
-            output_hidden_states=output_hidden_states,
-            return_dict=return_dict,
-        )
-        sequence_output = outputs[0]
+        if cls_hidden_reprs is not None:
+            # we also need to all the pooler once if configured.
+            sequence_output = cls_hidden_reprs
+            mul_pooled_output = sequence_output[:,0,:]
+        else:
+            outputs = self.roberta(
+                input_ids,
+                attention_mask=attention_mask,
+                token_type_ids=token_type_ids,
+                position_ids=position_ids,
+                head_mask=head_mask,
+                inputs_embeds=inputs_embeds,
+                # counterfactual arguments
+                source_hidden_states=source_hidden_states,
+                base_intervention_corr=base_intervention_corr,
+                source_intervention_corr=source_intervention_corr,
+                all_layers=all_layers,
+                # counterfactual arguments
+                output_attentions=output_attentions,
+                output_hidden_states=output_hidden_states,
+                return_dict=return_dict,
+            )
+            sequence_output = outputs[0]
+            mul_pooled_output = sequence_output[:,0,:]
+        
         logits = self.classifier(sequence_output)
-        
-        mul_pooled_output = sequence_output[:,0,:]
-        
+
         mul_logits_0 = self.multitask_classifier(mul_pooled_output[:,:self.intervention_h_dim])
         mul_logits_1 = self.multitask_classifier(mul_pooled_output[:,self.intervention_h_dim:self.intervention_h_dim*2])
         mul_logits_2 = self.multitask_classifier(mul_pooled_output[:,self.intervention_h_dim*2:self.intervention_h_dim*3])

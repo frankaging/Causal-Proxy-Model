@@ -383,7 +383,7 @@ class CausalProxyModelTrainer:
                 
                 #############################################   
                 # loss: task objective which is classification loss.
-                if "bert" in self.high_level_model_type:
+                if "bert" in self.high_level_model_type or "gpt" in self.high_level_model_type or "lstm" in self.high_level_model_type:
                     seq_cls_loss, seq_cls_count = self._logits_matching_loss(
                         base_outputs["logits"][0], pred_base_labels["logits"][0]
                     )
@@ -395,7 +395,7 @@ class CausalProxyModelTrainer:
                 mul_cls_loss, mul_cls_count = \
                         self._mul_classification_loss(*base_outputs["logits"][1:], base_aspect_labels.long())
                 # loss: iit loss.
-                if "bert" in self.high_level_model_type:
+                if "bert" in self.high_level_model_type or "gpt" in self.high_level_model_type or "lstm" in self.high_level_model_type:
                     iit_cls_loss, iit_cls_count = self._logits_matching_loss(
                         counterfactual_outputs["logits"][0], counterfactual_labels["logits"][0], 
                         loss_mask=base_intervention_corr!=-1
@@ -821,7 +821,7 @@ class CausalProxyModelTrainer:
         counterfactual_input_ids=None,
         counterfactual_attention_mask=None,
     ): 
-        if "bert" in self.high_level_model_type:
+        if "bert" in self.high_level_model_type or "gpt" in self.high_level_model_type or "lstm" in self.high_level_model_type:
             # high level model is another bert-based models
             # much more like model distillation.
             pred_base_labels, pred_source_labels, _ = self.high_level_model.forward(
