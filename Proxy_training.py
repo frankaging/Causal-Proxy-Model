@@ -314,6 +314,10 @@ def main():
         high_type = "roberta-base"
     elif "bert-base-uncased" in model_args.high_level_model_type_or_path:
         high_type = "bert-base-uncased"
+    elif "lstm" in model_args.high_level_model_type_or_path:
+        high_type = "lstm"
+    elif "gpt" in model_args.high_level_model_type_or_path:
+        high_type = "gpt2"
     elif "voting" in model_args.high_level_model_type_or_path:
         high_type = "voting"
     data_dir_postfix = data_args.dataset_name.strip("/").split("/")[-1]
