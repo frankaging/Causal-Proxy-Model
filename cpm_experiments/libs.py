@@ -266,6 +266,10 @@ def subplot_func(ax, index, results, with_labels=False, with_title=False):
 
     return ax
 
+class CausalExplainer(object):
+    def __init__(self):
+        pass
+
 def cebab_pipeline(
     model, explainer, 
     train_dataset, dev_dataset, 
@@ -298,7 +302,7 @@ def cebab_pipeline(
     )  # TODO why is the index not unique here?
         
     # get explanations
-    if isinstance(explanator, CausalExplainer):
+    if isinstance(explainer, CausalExplainer):
         explanations = explainer.estimate_icace(
             pairs_dataset,
             train_dataset # for query data.
@@ -427,3 +431,15 @@ def cebab_pipeline(
     performance_report = pd.DataFrame(data=performance_report_data, index=performance_report_index, columns=performance_report_col)
 
     return pairs_dataset, ATE, CEBaB_metrics, CEBaB_metrics_per_aspect_direction, CEBaB_metrics_per_aspect, CaCE_per_aspect_direction, ACaCE_per_aspect, performance_report
+
+def intervene_neuron_logits(
+    explanator, hidden_reprs, counterfactual_reprs, neuron_id
+):
+    hidden_reprs[0,neuron_id] = counterfactual_reprs[0,neuron_id]
+    intervened_outputs, _, _ = explanator.model.forward_with_cls_hidden_reprs(
+        cls_hidden_reprs=hidden_reprs.unsqueeze(dim=1)
+    )
+    intervened_logits = torch.nn.functional.softmax(
+            intervened_outputs.logits[0].cpu(), dim=-1
+    ).detach()[0]
+    return intervened_logits

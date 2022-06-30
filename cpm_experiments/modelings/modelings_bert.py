@@ -59,10 +59,6 @@ class BERTForCEBaB(Model):
     def get_classification_head(self):
         return self.model.classifier
 
-class CausalExplainer(object):
-    def __init__(self):
-        pass
-
 class CausalMediationModelForBERT(Explainer, CausalExplainer):
     def __init__(
         self, 
