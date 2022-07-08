@@ -230,7 +230,15 @@ class ModelArguments:
         metadata={
             "help": "Whether to set dropout on the IIT classifier."}
     ) 
-    
+        
+    true_counterfactual_c: float = field(
+        default=None,
+        metadata={
+            "help": "In case of training with few-shot of true counterfactuals, "\
+                    "we use this field to quantify the number of true "\
+                    "counterfactuals we use."}
+    ) 
+        
     wandb_metadata: str = field(
         default="go:IIT-ABSA",
         metadata={
@@ -328,6 +336,8 @@ def main():
                          f".hightype.{high_type}.{data_dir_postfix}"\
                          f".mode.{model_args.mode}.cls.dropout.{model_args.classifier_dropout}"\
                          f".enc.dropout.{model_args.encoder_dropout}"
+        if model_args.true_counterfactual_c is not None:
+            sub_output_dir += f".true.cfc.{model_args.true_counterfactual_c}"
     elif training_args.do_eval:
         train_dir = model_args.model_name_or_path.strip("/").split("/")[-1]
         sub_output_dir = f"{train_dir}.eval.{data_args.eval_split_name}.{data_dir_postfix}"
@@ -633,11 +643,41 @@ def main():
             desc="Running tokenizer on dataset",
         )
     if training_args.do_train:
-        query_dataset = raw_datasets[data_args.train_split_name]
         train_dataset = raw_datasets[data_args.train_split_name]
+        """
+        The following line is actually crucial!
+        
+        For now, my thinking is that we always have the training
+        dataset as the query set at least.
+        
+        The useage of the query set should be very specific:
+        this is, to query any sentence (randomly) with desired
+        concept label distribution. Nothing more. You should never
+        expect you can query out a true counterfactual. In fact,
+        that should never work! Unless you explicitly set it to be.
+        """
+        query_dataset = raw_datasets["train"]
         if data_args.max_train_samples is not None:
             train_dataset = train_dataset.select(
                 range(data_args.max_train_samples))
+        elif model_args.true_counterfactual_c is not None:
+            """
+            true_counterfactual_c represents how many clustered example sets
+            we give as the training data. all examples in one cluster belong
+            to a single original sentences with different counterfactual edits.
+            """
+            counterfactuals_original_ids = random.sample(
+                list(set(train_dataset["original_id"])), 
+                model_args.true_counterfactual_c
+            )
+            train_dataset = train_dataset.filter(
+                lambda example: example['original_id'] in counterfactuals_original_ids
+            )
+            max_train_samples = len(train_dataset)
+            logger.info(
+                f"Sample with true_counterfactual_c={max_train_samples}"\
+                f" of the training set."
+            )
     
     if training_args.do_eval:
         eval_dataset = raw_datasets[data_args.eval_split_name]
@@ -681,6 +721,7 @@ def main():
         eval_exclude_neutral=model_args.eval_exclude_neutral,
         high_level_model_type=model_args.high_level_model_type_or_path,
         mode=model_args.mode,
+        true_counterfactuals_only=True if model_args.true_counterfactual_c is not None else False,
     )
     
     if training_args.do_train:

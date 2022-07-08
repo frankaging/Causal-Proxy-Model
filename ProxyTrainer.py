@@ -51,9 +51,11 @@ class CausalProxyModelTrainer:
         eval_exclude_neutral,
         high_level_model_type,
         mode,
+        true_counterfactuals_only,
     ):
         self.args = args
         self.train_dataset = train_dataset
+        self.secondary_train_dataset = train_dataset.data.to_pandas()
         self.query_dataset = query_dataset.data.to_pandas()
         self.eval_dataset = eval_dataset
         self.low_level_model = low_level_model
@@ -72,6 +74,10 @@ class CausalProxyModelTrainer:
         self.high_level_model_type = high_level_model_type
         
         self.mode = mode
+        
+        self.true_counterfactuals_only = true_counterfactuals_only
+        if self.true_counterfactuals_only:
+            logger.warning(f"We will only allow true counterfactuals for training.")
         # device
         self.device = device
         self.high_level_model.model.to(self.device)
@@ -208,54 +214,153 @@ class CausalProxyModelTrainer:
     def prepare_batch(
         self,
         input_ids, attention_mask, labels, aspect_labels,
+        original_ids, ids,
     ):
-        # TODO: explore other pairing strategies?
-        source_input_ids = input_ids.clone()
-        source_attention_mask = attention_mask.clone()
-        source_labels = labels.clone()
-        source_aspect_labels = aspect_labels.clone()
-        
-        _sort_index = [i for i in range(source_input_ids.shape[0])]
-        random.shuffle(_sort_index)
+        if self.true_counterfactuals_only:
+            """
+            Using Only True Counterfactuls.
+            
+            Steps:
+            1. from the base example, select a true counterfactual 
+               based on original_id.
+            2. randomly decide an intervention site (i.e., concept)
+            3. then backfill the source example by selecting an 
+               example with desired label for the intervening concept.
+            """
+            
+            # sample a true counterfactual
+            counterfactual_input_ids = []
+            counterfactual_ids = []
+            counterfactual_attention_mask = []
+            counterfactual_aspect_labels = []
+            counterfactual_masks = []
+            for i in range(0, aspect_labels.shape[0]):
+                satisfied_counterfactuals = self.secondary_train_dataset[
+                    (self.secondary_train_dataset["original_id"]==original_ids[i])
+                ]
+                if len(satisfied_counterfactuals) > 0:
+                    sampled_counterfactual = satisfied_counterfactuals.sample().iloc[0]
+                    counterfactual_input_ids += [sampled_counterfactual["input_ids"]]
+                    counterfactual_attention_mask += [sampled_counterfactual["attention_mask"]]
+                    counterfactual_aspect_labels += [sampled_counterfactual["aspect_labels"]]
+                    counterfactual_masks += [True]
+                    counterfactual_ids += [sampled_counterfactual["id"]]
+                else:
+                    # this shall never happen! since we always assume
+                    # we can at least sample a counterfactual.
+                    counterfactual_input_ids += [input_ids[i].tolist()]
+                    counterfactual_attention_mask += [attention_mask[i].tolist()]
+                    counterfactual_aspect_labels += [aspect_labels[i].tolist()]
+                    counterfactual_masks += [False]
+                    counterfactual_ids += ["not_exist"]
+                    
+            counterfactual_input_ids = torch.tensor(counterfactual_input_ids).long()
+            counterfactual_attention_mask = torch.tensor(counterfactual_attention_mask).long()
+            counterfactual_aspect_labels = torch.tensor(counterfactual_aspect_labels).long()
 
-        source_input_ids = source_input_ids[_sort_index]
-        source_attention_mask = source_attention_mask[_sort_index]
-        source_labels = source_labels[_sort_index]
-        source_aspect_labels = source_aspect_labels[_sort_index]
-        
-        base_intervention_mask, source_intervention_mask, \
-            base_intervention_corr, source_intervention_corr = self._get_interchange_mask(
-            aspect_labels, source_aspect_labels
-        )
-        
-        #########
-        # Counterfactual lookup!
-        counterfactual_aspect_labels = aspect_labels.clone()
-        counterfactual_aspect_labels[base_intervention_mask] = \
-            source_aspect_labels[source_intervention_mask]
-        
-        counterfactual_input_ids = []
-        counterfactual_attention_mask = []
-        for i in range(0, counterfactual_aspect_labels.shape[0]):
-            satisfied_rows = self.query_dataset[
-                (self.query_dataset["ambiance_label"]==int(counterfactual_aspect_labels[i,0]))&
-                (self.query_dataset["food_label"]==int(counterfactual_aspect_labels[i,1]))&
-                (self.query_dataset["noise_label"]==int(counterfactual_aspect_labels[i,2]))&
-                (self.query_dataset["service_label"]==int(counterfactual_aspect_labels[i,3]))
-            ]
-            if len(satisfied_rows) > 0:
-                sampled_counterfactual = satisfied_rows.sample().iloc[0]
-                counterfactual_input_ids += [sampled_counterfactual["input_ids"]]
-                counterfactual_attention_mask += [sampled_counterfactual["attention_mask"]]
-            else:
-                base_intervention_corr[i] = -1
-                counterfactual_input_ids += [input_ids[i].tolist()]
-                counterfactual_attention_mask += [attention_mask[i].tolist()]
-        # Lookup examples based on these aspect ratings, and select one!
-        counterfactual_input_ids = torch.tensor(counterfactual_input_ids).long()
-        counterfactual_attention_mask = torch.tensor(counterfactual_attention_mask).long()
-        #########
-        
+            # sample an intervention site
+            base_intervention_mask, counterfactual_intervention_mask, \
+                base_intervention_corr, counterfactual_intervention_corr = \
+                self._get_interchange_mask_true_counterfactual(
+                    aspect_labels, counterfactual_aspect_labels
+                )
+            
+            source_input_ids = []
+            source_attention_mask = []
+            source_labels = []
+            source_aspect_labels = []
+            # backfill a source example
+            # (+,+,-,-) (+,'-',-,-) ' ' marks the desired change -> (+,'-',-,-)
+            for i in range(0, counterfactual_aspect_labels.shape[0]):
+                counterfactual_aspect_label = counterfactual_aspect_labels[
+                    i, counterfactual_intervention_corr[i]
+                ]
+                base_aspect_label = aspect_labels[
+                    i, counterfactual_intervention_corr[i]
+                ]
+                aspect_label = {
+                    0:"ambiance_label",1:"food_label",
+                    2:"noise_label",3:"service_label"
+                }[counterfactual_intervention_corr[i]]
+                satisfied_rows = self.query_dataset[
+                    (self.query_dataset[aspect_label]==int(counterfactual_aspect_label))&
+                    # we don't sample the original sentence!
+                    (self.query_dataset["id"]!=counterfactual_ids[i])
+                ]
+                
+                if len(satisfied_rows) > 0 and counterfactual_masks[i]:
+                    satisfied_rows = satisfied_rows.sample().iloc[0]
+                    source_input_ids += [satisfied_rows["input_ids"]]
+                    source_attention_mask += [satisfied_rows["attention_mask"]]
+                    source_labels += [satisfied_rows["label"]]
+                    source_aspect_labels += [satisfied_rows["aspect_labels"]]
+                else:
+                    base_intervention_corr[i] = -1
+                    source_input_ids += [input_ids[i].tolist()]
+                    source_attention_mask += [attention_mask[i].tolist()]
+                    source_labels += [labels[i].tolist()]
+                    source_aspect_labels += [aspect_labels[i].tolist()]  
+                    
+            source_input_ids = torch.tensor(source_input_ids).long()
+            source_attention_mask = torch.tensor(source_attention_mask).long()
+            source_labels = torch.tensor(source_labels).long()
+            source_aspect_labels = torch.tensor(source_aspect_labels).long()
+            
+        else:
+            """
+            Random Selection without Using True Counterfactuals.
+            
+            Steps:
+            1. randomly select a source from the same batch.
+            2. randomly decide an intervention site (i.e., concept)
+            3. sample an example from the query set where the example
+               has desired labels for all the concepts.
+            """
+            
+            source_input_ids = input_ids.clone()
+            source_attention_mask = attention_mask.clone()
+            source_labels = labels.clone()
+            source_aspect_labels = aspect_labels.clone()
+
+            _sort_index = [i for i in range(source_input_ids.shape[0])]
+            random.shuffle(_sort_index)
+
+            source_input_ids = source_input_ids[_sort_index]
+            source_attention_mask = source_attention_mask[_sort_index]
+            source_labels = source_labels[_sort_index]
+            source_aspect_labels = source_aspect_labels[_sort_index]
+
+            base_intervention_mask, source_intervention_mask, \
+                base_intervention_corr, source_intervention_corr = self._get_interchange_mask(
+                aspect_labels, source_aspect_labels
+            )
+            counterfactual_aspect_labels = aspect_labels.clone()
+            counterfactual_aspect_labels[base_intervention_mask] = \
+                source_aspect_labels[source_intervention_mask]
+
+            counterfactual_input_ids = []
+            counterfactual_attention_mask = []
+            for i in range(0, counterfactual_aspect_labels.shape[0]):
+                #########
+                # Random Counterfactual lookup!
+                satisfied_rows = self.query_dataset[
+                    (self.query_dataset["ambiance_label"]==int(counterfactual_aspect_labels[i,0]))&
+                    (self.query_dataset["food_label"]==int(counterfactual_aspect_labels[i,1]))&
+                    (self.query_dataset["noise_label"]==int(counterfactual_aspect_labels[i,2]))&
+                    (self.query_dataset["service_label"]==int(counterfactual_aspect_labels[i,3]))
+                ]
+                #########
+                if len(satisfied_rows) > 0:
+                    sampled_counterfactual = satisfied_rows.sample().iloc[0]
+                    counterfactual_input_ids += [sampled_counterfactual["input_ids"]]
+                    counterfactual_attention_mask += [sampled_counterfactual["attention_mask"]]
+                else:
+                    base_intervention_corr[i] = -1
+                    counterfactual_input_ids += [input_ids[i].tolist()]
+                    counterfactual_attention_mask += [attention_mask[i].tolist()]
+            counterfactual_input_ids = torch.tensor(counterfactual_input_ids).long()
+            counterfactual_attention_mask = torch.tensor(counterfactual_attention_mask).long()
+
         # send all data to gpus.
         base_labels = labels.to(self.device)
         base_aspect_labels = aspect_labels.float().to(self.device)
@@ -334,6 +439,8 @@ class CausalProxyModelTrainer:
                 input_ids = batch["input_ids"]
                 attention_mask = batch["attention_mask"]
                 labels = batch["labels"]
+                original_ids = batch["original_id"]
+                ids = batch["id"]
                 aspect_labels = torch.stack(
                     [
                         batch["ambiance_label"], batch["food_label"], 
@@ -349,7 +456,7 @@ class CausalProxyModelTrainer:
                     base_intervention_mask, source_intervention_mask, base_intervention_corr, source_intervention_corr, \
                     counterfactual_input_ids, counterfactual_attention_mask = \
                 self.prepare_batch(
-                    *(input_ids, attention_mask, labels, aspect_labels)
+                    *(input_ids, attention_mask, labels, aspect_labels, original_ids, ids)
                 )
 
                 input_bundle = (
@@ -509,16 +616,18 @@ class CausalProxyModelTrainer:
                 input_ids = batch["input_ids"]
                 attention_mask = batch["attention_mask"]
                 labels = batch["labels"]
+                original_ids = batch["original_id"]
+                ids = batch["id"]
                 aspect_labels = torch.stack(
                     [
                         batch["ambiance_label"], batch["food_label"], 
-                        batch["noise_label"], batch["service_label"]
+                        batch["noise_label"], batch["service_label"], 
                     ], 
                     dim=-1
                 )
                 
                 prepared_batch = self.prepare_batch(
-                    *(input_ids, attention_mask, labels, aspect_labels)
+                    *(input_ids, attention_mask, labels, aspect_labels, original_ids, ids)
                 )
                 self._step(*prepared_batch)
                 iter_bar.update()
@@ -536,6 +645,40 @@ class CausalProxyModelTrainer:
         logger.info("Save very last checkpoint as `pytorch_model.bin`.")
         self.save_checkpoint()
         logger.info("Training is finished")
+    
+    def _get_interchange_mask_true_counterfactual(
+        self,
+        base_aspect_labels,
+        source_aspect_labels,
+    ):
+        intervention_mask = torch.zeros_like(base_aspect_labels).bool()
+        intervention_corr = []
+        
+        for i in range(0, base_aspect_labels.shape[0]):
+            mismatch_indices = (
+                (base_aspect_labels[i]!=-1)&(source_aspect_labels[i]!=-1)&\
+                (base_aspect_labels[i]!=source_aspect_labels[i])
+            ).nonzero(as_tuple=False)
+            if len(mismatch_indices) != 0:
+                # it means we mismatched places, it means we need to sample from them.
+                chosen_index = np.random.choice(mismatch_indices.flatten())
+                intervention_corr += [chosen_index]
+                intervention_mask[i, chosen_index] = True
+            else:
+                # it means we sample the exact same sequence. this is okay, as we need
+                # to learn when the logits should not change.
+                nonzero_indices = (
+                    (base_aspect_labels[i]!=-1)&(source_aspect_labels[i]!=-1)
+                ).nonzero(as_tuple=False)
+                if len(nonzero_indices) != 0:
+                    chosen_index = np.random.choice(nonzero_indices.flatten())
+                    intervention_corr += [chosen_index]
+                    intervention_mask[i, chosen_index] = True
+                else:
+                    intervention_corr += [-1]
+
+        return intervention_mask, intervention_mask, \
+            torch.tensor(intervention_corr), torch.tensor(intervention_corr)
     
     def _get_interchange_mask(
         self,
@@ -968,7 +1111,7 @@ class CausalProxyModelTrainer:
             return dataset
 
         self._signature_columns = [
-            "label", "label_ids", "input_ids", "attention_mask",
+            "label", "label_ids", "input_ids", "attention_mask", "original_id", "id",
             'ambiance_label', 'food_label', 'noise_label', 'service_label'
         ]
 

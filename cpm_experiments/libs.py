@@ -29,11 +29,17 @@ from sklearn.metrics import classification_report
 
 from models.modelings_roberta import *
 from models.modelings_bert import *
+from models.modelings_gpt2 import *
+from models.modelings_lstm import *
 
 from eval_pipeline.models.abstract_model import Model 
 from eval_pipeline.explainers.abstract_explainer import Explainer
 from eval_pipeline.utils.data_utils import preprocess_hf_dataset
 from eval_pipeline.customized_models.bert import BertForNonlinearSequenceClassification
+from eval_pipeline.customized_models.roberta import RobertaForNonlinearSequenceClassification
+from eval_pipeline.customized_models.gpt2 import GPT2ForNonlinearSequenceClassification
+from eval_pipeline.customized_models.lstm.lstm import LSTMForNonLinearSequenceClassification
+
 from eval_pipeline.utils import metric_utils, get_intervention_pairs
 from eval_pipeline.explainers.random_explainer import RandomExplainer
 from eval_pipeline.explainers.conexp import CONEXP
