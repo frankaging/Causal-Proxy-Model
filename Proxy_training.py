@@ -231,7 +231,7 @@ class ModelArguments:
             "help": "Whether to set dropout on the IIT classifier."}
     ) 
         
-    true_counterfactual_c: float = field(
+    true_counterfactual_c: int = field(
         default=None,
         metadata={
             "help": "In case of training with few-shot of true counterfactuals, "\
@@ -642,6 +642,26 @@ def main():
             load_from_cache_file=not data_args.overwrite_cache,
             desc="Running tokenizer on dataset",
         )
+        
+    assert len(set(raw_datasets["train"]["id"])) == len(raw_datasets["train"]["id"])
+    assert len(set(raw_datasets["validation"]["id"])) == len(raw_datasets["validation"]["id"])
+    assert len(set(raw_datasets["test"]["id"])) == len(raw_datasets["test"]["id"])
+    all_ids = set(raw_datasets["train"]["id"]).union(set(raw_datasets["validation"]["id"])).union(set(raw_datasets["test"]["id"]))
+    sequential_id_mapping = {}
+    _sequential_id = 0
+    for _id in all_ids:
+        sequential_id_mapping[_id] = _sequential_id
+        _sequential_id += 1
+    def convert_str_to_int(examples):
+        examples["original_id"] = int(examples["original_id"])
+        examples["edit_id"] = int(examples["edit_id"])
+        examples["id"] = sequential_id_mapping[examples["id"]]
+        return examples
+    raw_datasets = raw_datasets.map(
+        convert_str_to_int,
+        desc="Converting str based ids to int based ids",
+    )
+    
     if training_args.do_train:
         train_dataset = raw_datasets[data_args.train_split_name]
         """
@@ -666,19 +686,24 @@ def main():
             we give as the training data. all examples in one cluster belong
             to a single original sentences with different counterfactual edits.
             """
+            # a corner case handling
+            max_original_sentences = len(set(train_dataset["original_id"]))
+            if int(model_args.true_counterfactual_c) > max_original_sentences:
+                model_args.true_counterfactual_c = max_original_sentences
             counterfactuals_original_ids = random.sample(
                 list(set(train_dataset["original_id"])), 
-                model_args.true_counterfactual_c
+                int(model_args.true_counterfactual_c)
             )
             train_dataset = train_dataset.filter(
                 lambda example: example['original_id'] in counterfactuals_original_ids
             )
             max_train_samples = len(train_dataset)
             logger.info(
-                f"Sample with true_counterfactual_c={max_train_samples}"\
-                f" of the training set."
+                f"Sample with max_train_samples={max_train_samples}"\
+                f" of the training set with true_counterfactual_c={model_args.true_counterfactual_c}"\
+                f" out of total {max_original_sentences} original sentences."
             )
-    
+
     if training_args.do_eval:
         eval_dataset = raw_datasets[data_args.eval_split_name]
         if data_args.max_eval_samples is not None:

@@ -21,7 +21,7 @@ class GPT2ForCEBaB(Model):
         # GPT2 was trained without pad token but this is needed to batchify the data.
         # Because of the attention mask, the choice of pad_token will have no effect.
         self.tokenizer.pad_token = self.tokenizer.eos_token
-        
+        self.model.config.pad_token_id = self.tokenizer.pad_token_id
         self.model.to(device)
 
     def __str__(self):
@@ -116,6 +116,8 @@ class CausalProxyModelForGPT2(Explainer, CausalExplainer):
         # GPT2 was trained without pad token but this is needed to batchify the data.
         # Because of the attention mask, the choice of pad_token will have no effect.
         self.tokenizer.pad_token = self.tokenizer.eos_token
+        self.blackbox_model.config.pad_token_id = self.tokenizer.pad_token_id
+        self.cpm_model.model.config.pad_token_id = self.tokenizer.pad_token_id
         
     def fit(self, dataset, classifier_predictions, classifier, dev_dataset=None):
         # we don't need to train IIT here.

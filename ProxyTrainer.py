@@ -211,6 +211,62 @@ class CausalProxyModelTrainer:
         log_train.close()
         log_eval.close()
         
+    def _get_interchange_mask_true_counterfactual(
+        self,
+        base_aspect_labels,
+        source_aspect_labels,
+    ):
+        intervention_mask = torch.zeros_like(base_aspect_labels).bool()
+        intervention_corr = []
+        
+        for i in range(0, base_aspect_labels.shape[0]):
+            mismatch_indices = (
+                (base_aspect_labels[i]!=-1)&(source_aspect_labels[i]!=-1)&\
+                (base_aspect_labels[i]!=source_aspect_labels[i])
+            ).nonzero(as_tuple=False)
+            if len(mismatch_indices) != 0:
+                # it means we mismatched places, it means we need to sample from them.
+                chosen_index = np.random.choice(mismatch_indices.flatten())
+                intervention_corr += [chosen_index]
+                intervention_mask[i, chosen_index] = True
+            else:
+                # it means we sample the exact same sequence. this is okay, as we need
+                # to learn when the logits should not change.
+                nonzero_indices = (
+                    (base_aspect_labels[i]!=-1)&(source_aspect_labels[i]!=-1)
+                ).nonzero(as_tuple=False)
+                if len(nonzero_indices) != 0:
+                    chosen_index = np.random.choice(nonzero_indices.flatten())
+                    intervention_corr += [chosen_index]
+                    intervention_mask[i, chosen_index] = True
+                else:
+                    intervention_corr += [-1]
+
+        return intervention_mask, intervention_mask, \
+            torch.tensor(intervention_corr), torch.tensor(intervention_corr)
+    
+    def _get_interchange_mask(
+        self,
+        base_aspect_labels,
+        source_aspect_labels,
+    ):
+        intervention_mask = torch.zeros_like(base_aspect_labels).bool()
+        intervention_corr = []
+        
+        for i in range(0, base_aspect_labels.shape[0]):
+            nonzero_indices = (
+                (base_aspect_labels[i]!=-1)&(source_aspect_labels[i]!=-1)
+            ).nonzero(as_tuple=False)
+            if len(nonzero_indices) != 0:
+                chosen_index = np.random.choice(nonzero_indices.flatten())
+                intervention_corr += [chosen_index]
+                intervention_mask[i, chosen_index] = True
+            else:
+                intervention_corr += [-1]
+
+        return intervention_mask, intervention_mask, \
+            torch.tensor(intervention_corr), torch.tensor(intervention_corr)
+        
     def prepare_batch(
         self,
         input_ids, attention_mask, labels, aspect_labels,
@@ -236,13 +292,17 @@ class CausalProxyModelTrainer:
             counterfactual_masks = []
             for i in range(0, aspect_labels.shape[0]):
                 satisfied_counterfactuals = self.secondary_train_dataset[
-                    (self.secondary_train_dataset["original_id"]==original_ids[i])
+                    # when matching with ids, need to turn it into a int.
+                    (self.secondary_train_dataset["original_id"]==int(original_ids[i]))
                 ]
                 if len(satisfied_counterfactuals) > 0:
                     sampled_counterfactual = satisfied_counterfactuals.sample().iloc[0]
                     counterfactual_input_ids += [sampled_counterfactual["input_ids"]]
                     counterfactual_attention_mask += [sampled_counterfactual["attention_mask"]]
-                    counterfactual_aspect_labels += [sampled_counterfactual["aspect_labels"]]
+                    counterfactual_aspect_labels += [[
+                        sampled_counterfactual["ambiance_label"], sampled_counterfactual["food_label"], 
+                        sampled_counterfactual["noise_label"], sampled_counterfactual["service_label"]
+                    ]]
                     counterfactual_masks += [True]
                     counterfactual_ids += [sampled_counterfactual["id"]]
                 else:
@@ -281,11 +341,11 @@ class CausalProxyModelTrainer:
                 aspect_label = {
                     0:"ambiance_label",1:"food_label",
                     2:"noise_label",3:"service_label"
-                }[counterfactual_intervention_corr[i]]
+                }[counterfactual_intervention_corr[i].tolist()]
                 satisfied_rows = self.query_dataset[
                     (self.query_dataset[aspect_label]==int(counterfactual_aspect_label))&
                     # we don't sample the original sentence!
-                    (self.query_dataset["id"]!=counterfactual_ids[i])
+                    (self.query_dataset["id"]!=int(counterfactual_ids[i]))
                 ]
                 
                 if len(satisfied_rows) > 0 and counterfactual_masks[i]:
@@ -293,7 +353,10 @@ class CausalProxyModelTrainer:
                     source_input_ids += [satisfied_rows["input_ids"]]
                     source_attention_mask += [satisfied_rows["attention_mask"]]
                     source_labels += [satisfied_rows["label"]]
-                    source_aspect_labels += [satisfied_rows["aspect_labels"]]
+                    source_aspect_labels += [[
+                        satisfied_rows["ambiance_label"], satisfied_rows["food_label"], 
+                        satisfied_rows["noise_label"], satisfied_rows["service_label"]
+                    ]]
                 else:
                     base_intervention_corr[i] = -1
                     source_input_ids += [input_ids[i].tolist()]
@@ -305,6 +368,9 @@ class CausalProxyModelTrainer:
             source_attention_mask = torch.tensor(source_attention_mask).long()
             source_labels = torch.tensor(source_labels).long()
             source_aspect_labels = torch.tensor(source_aspect_labels).long()
+            
+            source_intervention_corr = base_intervention_corr.clone()
+            source_intervention_mask = base_intervention_mask
             
         else:
             """
@@ -646,62 +712,6 @@ class CausalProxyModelTrainer:
         self.save_checkpoint()
         logger.info("Training is finished")
     
-    def _get_interchange_mask_true_counterfactual(
-        self,
-        base_aspect_labels,
-        source_aspect_labels,
-    ):
-        intervention_mask = torch.zeros_like(base_aspect_labels).bool()
-        intervention_corr = []
-        
-        for i in range(0, base_aspect_labels.shape[0]):
-            mismatch_indices = (
-                (base_aspect_labels[i]!=-1)&(source_aspect_labels[i]!=-1)&\
-                (base_aspect_labels[i]!=source_aspect_labels[i])
-            ).nonzero(as_tuple=False)
-            if len(mismatch_indices) != 0:
-                # it means we mismatched places, it means we need to sample from them.
-                chosen_index = np.random.choice(mismatch_indices.flatten())
-                intervention_corr += [chosen_index]
-                intervention_mask[i, chosen_index] = True
-            else:
-                # it means we sample the exact same sequence. this is okay, as we need
-                # to learn when the logits should not change.
-                nonzero_indices = (
-                    (base_aspect_labels[i]!=-1)&(source_aspect_labels[i]!=-1)
-                ).nonzero(as_tuple=False)
-                if len(nonzero_indices) != 0:
-                    chosen_index = np.random.choice(nonzero_indices.flatten())
-                    intervention_corr += [chosen_index]
-                    intervention_mask[i, chosen_index] = True
-                else:
-                    intervention_corr += [-1]
-
-        return intervention_mask, intervention_mask, \
-            torch.tensor(intervention_corr), torch.tensor(intervention_corr)
-    
-    def _get_interchange_mask(
-        self,
-        base_aspect_labels,
-        source_aspect_labels,
-    ):
-        intervention_mask = torch.zeros_like(base_aspect_labels).bool()
-        intervention_corr = []
-        
-        for i in range(0, base_aspect_labels.shape[0]):
-            nonzero_indices = (
-                (base_aspect_labels[i]!=-1)&(source_aspect_labels[i]!=-1)
-            ).nonzero(as_tuple=False)
-            if len(nonzero_indices) != 0:
-                chosen_index = np.random.choice(nonzero_indices.flatten())
-                intervention_corr += [chosen_index]
-                intervention_mask[i, chosen_index] = True
-            else:
-                intervention_corr += [-1]
-
-        return intervention_mask, intervention_mask, \
-            torch.tensor(intervention_corr), torch.tensor(intervention_corr)
-    
     def _representation_matching_loss(
         self,
         pred_repr,
@@ -873,7 +883,7 @@ class CausalProxyModelTrainer:
             counterfactual_input_ids,
             counterfactual_attention_mask,
         )
-
+        
         #############################################
         # high level model.
         with torch.no_grad():
@@ -1145,7 +1155,7 @@ class CausalProxyModelTrainer:
 
         train_dataset = self.train_dataset
         train_dataset = self._remove_unused_columns(train_dataset, description="training")
-
+        
         return DataLoader(
             train_dataset,
             batch_size=self.train_batch_size,
@@ -1168,7 +1178,7 @@ class CausalProxyModelTrainer:
 
         eval_dataset = self.eval_dataset
         eval_dataset = self._remove_unused_columns(eval_dataset, description="evaluation")
-
+        
         return DataLoader(
             eval_dataset,
             sampler=SequentialSampler(eval_dataset),
