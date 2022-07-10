@@ -274,7 +274,6 @@ class CausalProxyModelTrainer:
         original_ids, ids,
         batch_type="train"
     ):
-        batch_type = "train"
         if self.true_counterfactuals_only:
             """
             Using Only True Counterfactuls.
