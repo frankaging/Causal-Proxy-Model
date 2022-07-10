@@ -1,6 +1,44 @@
 # scripts for doing the few-shot true counterfactual training.
 # here, we only study this for the BERT-model.
-
+# this is unlucky, i have to use gradient_accumulation_steps=2. f!
+for h_dim in 192; do
+    for class_num in 5; do
+        for true_counterfactual_c in 50 100 200 272; do
+            for seed in 42 66 77 88 99; do # 42
+                CUDA_VISIBLE_DEVICES=6,7,8,9 python Proxy_training.py \
+                --tokenizer_name bert-base-uncased \
+                --model_name_or_path ./saved_models/bert-base-uncased.opentable.CEBaB.sa.${class_num}-class.exclusive.seed_${seed}/ \
+                --high_level_model_type_or_path ./saved_models/bert-base-uncased.opentable.CEBaB.sa.${class_num}-class.exclusive.seed_${seed}/ \
+                --task_name CEBaB \
+                --dataset_name ./datasets/Proxy.CEBaB.sa.${class_num}-class.exclusive \
+                --do_train \
+                --do_eval \
+                --train_split_name validation \
+                --eval_split_name test \
+                --max_seq_length 128 \
+                --per_device_train_batch_size 16 \
+                --per_device_eval_batch_size 16 \
+                --gradient_accumulation_steps 2 \
+                --learning_rate 8e-5 \
+                --num_train_epochs 60 \
+                --output_dir ./proxy_training_results/BERT-fewshots-results/ \
+                --cache_dir ./train_cache/ \
+                --seed ${seed} \
+                --report_to wandb \
+                --wandb_metadata wuzhengx:Causal-Proxy-Model \
+                --logging_steps 1 \
+                --alpha 1.0 \
+                --beta 1.0 \
+                --gemma 3.0 \
+                --overwrite_output_dir \
+                --intervention_h_dim ${h_dim} \
+                --classifier_dropout 0.1 \
+                --encoder_dropout 0.1 \
+                --true_counterfactual_c ${true_counterfactual_c}
+            done
+        done
+    done
+done
 
 # scripts for gpt2 model main results.
 # for h_dim in 192; do

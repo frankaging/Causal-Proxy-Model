@@ -58,6 +58,7 @@ class CausalProxyModelTrainer:
         self.secondary_train_dataset = train_dataset.data.to_pandas()
         self.query_dataset = query_dataset.data.to_pandas()
         self.eval_dataset = eval_dataset
+        self.secondary_eval_dataset = eval_dataset.data.to_pandas()
         self.low_level_model = low_level_model
         self.high_level_model = high_level_model
         self.data_collator = data_collator
@@ -271,7 +272,9 @@ class CausalProxyModelTrainer:
         self,
         input_ids, attention_mask, labels, aspect_labels,
         original_ids, ids,
+        batch_type="train"
     ):
+        batch_type = "train"
         if self.true_counterfactuals_only:
             """
             Using Only True Counterfactuls.
@@ -291,10 +294,17 @@ class CausalProxyModelTrainer:
             counterfactual_aspect_labels = []
             counterfactual_masks = []
             for i in range(0, aspect_labels.shape[0]):
-                satisfied_counterfactuals = self.secondary_train_dataset[
-                    # when matching with ids, need to turn it into a int.
-                    (self.secondary_train_dataset["original_id"]==int(original_ids[i]))
-                ]
+                if batch_type == "train":
+                    satisfied_counterfactuals = self.secondary_train_dataset[
+                        # when matching with ids, need to turn it into a int.
+                        (self.secondary_train_dataset["original_id"]==int(original_ids[i]))
+                    ]
+                elif batch_type == "eval":
+                    satisfied_counterfactuals = self.secondary_eval_dataset[
+                        # when matching with ids, need to turn it into a int.
+                        (self.secondary_eval_dataset["original_id"]==int(original_ids[i]))
+                    ]
+                
                 if len(satisfied_counterfactuals) > 0:
                     sampled_counterfactual = satisfied_counterfactuals.sample().iloc[0]
                     counterfactual_input_ids += [sampled_counterfactual["input_ids"]]
@@ -338,17 +348,19 @@ class CausalProxyModelTrainer:
                 base_aspect_label = aspect_labels[
                     i, counterfactual_intervention_corr[i]
                 ]
-                aspect_label = {
-                    0:"ambiance_label",1:"food_label",
-                    2:"noise_label",3:"service_label"
-                }[counterfactual_intervention_corr[i].tolist()]
-                satisfied_rows = self.query_dataset[
-                    (self.query_dataset[aspect_label]==int(counterfactual_aspect_label))&
-                    # we don't sample the original sentence!
-                    (self.query_dataset["id"]!=int(counterfactual_ids[i]))
-                ]
+                satisfied_rows = None
+                if int(counterfactual_intervention_corr[i]) != -1:
+                    aspect_label = {
+                        0:"ambiance_label",1:"food_label",
+                        2:"noise_label",3:"service_label"
+                    }[int(counterfactual_intervention_corr[i])]
+                    satisfied_rows = self.query_dataset[
+                        (self.query_dataset[aspect_label]==int(counterfactual_aspect_label))&
+                        # we don't sample the original sentence!
+                        (self.query_dataset["id"]!=int(counterfactual_ids[i]))
+                    ]
                 
-                if len(satisfied_rows) > 0 and counterfactual_masks[i]:
+                if satisfied_rows is not None and len(satisfied_rows) > 0 and counterfactual_masks[i]:
                     satisfied_rows = satisfied_rows.sample().iloc[0]
                     source_input_ids += [satisfied_rows["input_ids"]]
                     source_attention_mask += [satisfied_rows["attention_mask"]]
@@ -522,7 +534,7 @@ class CausalProxyModelTrainer:
                     base_intervention_mask, source_intervention_mask, base_intervention_corr, source_intervention_corr, \
                     counterfactual_input_ids, counterfactual_attention_mask = \
                 self.prepare_batch(
-                    *(input_ids, attention_mask, labels, aspect_labels, original_ids, ids)
+                    *(input_ids, attention_mask, labels, aspect_labels, original_ids, ids, "eval")
                 )
 
                 input_bundle = (
@@ -693,7 +705,7 @@ class CausalProxyModelTrainer:
                 )
                 
                 prepared_batch = self.prepare_batch(
-                    *(input_ids, attention_mask, labels, aspect_labels, original_ids, ids)
+                    *(input_ids, attention_mask, labels, aspect_labels, original_ids, ids, "train")
                 )
                 self._step(*prepared_batch)
                 iter_bar.update()

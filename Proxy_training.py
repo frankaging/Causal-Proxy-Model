@@ -703,7 +703,9 @@ def main():
                 f" of the training set with true_counterfactual_c={model_args.true_counterfactual_c}"\
                 f" out of total {max_original_sentences} original sentences."
             )
-
+        # to ensure faireness, we need to adjust the training epoch numbers. i.e., total optimization steps.
+        training_args.num_train_epochs *= (len(raw_datasets["train"])/max_train_samples)
+            
     if training_args.do_eval:
         eval_dataset = raw_datasets[data_args.eval_split_name]
         if data_args.max_eval_samples is not None:
