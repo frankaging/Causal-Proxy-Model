@@ -238,7 +238,7 @@ class CausalMediationModelForBERT(Explainer, CausalExplainer):
         intervention_h_dim=1,
         min_iit_pair_examples=1,
         match_non_int_type=False,
-        cache_dir="../../huggingface_cache",
+        cache_dir="../train_cache/",
         align_neurons=None,
     ):
         self.batch_size = batch_size
@@ -351,6 +351,7 @@ class CausalMediationModelForBERT(Explainer, CausalExplainer):
                 intervention_type += ["noise"]
             if _type == "service":
                 intervention_type += ["service"]
+
         return base_x, source_x, intervention_type, iit_pairs_dataset
     
     def estimate_icace(self, pairs, df):
@@ -359,11 +360,13 @@ class CausalMediationModelForBERT(Explainer, CausalExplainer):
         base_x, source_x, intervention_type, iit_pairs_dataset = self.preprocess(
             pairs, df
         )
+        # print(source_x)
         with torch.no_grad():
             for i in tqdm(range(ceil(len(iit_pairs_dataset)/self.batch_size))):
                 base_x_batch = {k:v[i*self.batch_size:(i+1)*self.batch_size].to(self.device) for k,v in base_x.items()} 
                 source_x_batch = {k:v[i*self.batch_size:(i+1)*self.batch_size].to(self.device) for k,v in source_x.items()} 
                 intervention_type_batch = intervention_type[i*self.batch_size:(i+1)*self.batch_size]
+
                 # base output.
                 outputs = self.model.model(
                     **base_x_batch,
@@ -373,31 +376,32 @@ class CausalMediationModelForBERT(Explainer, CausalExplainer):
                     outputs.logits[0].cpu(), dim=-1
                 ).detach()
                 base_cls_hidden_state = outputs.hidden_states[-1][:,0,:].detach()
+                
                 # source output.
                 source_outputs = self.model.model(
                     **source_x_batch,
                     output_hidden_states=True,
                 )
                 source_cls_hidden_state = source_outputs.hidden_states[-1][:,0,:].detach()
+                
                 # intervention.
-                selected_neurons = self.align_neurons[intervention_type_batch[0]]
-                for neuron_id in selected_neurons:
-                    base_cls_hidden_state[:, neuron_id] = source_cls_hidden_state[:, neuron_id]
+                for j in range(len(intervention_type_batch)):
+                    selected_neurons = self.align_neurons[intervention_type_batch[j]]
+                    for neuron_id in selected_neurons:
+                        base_cls_hidden_state[j, neuron_id] = source_cls_hidden_state[j, neuron_id]
                 # counterfactual output.
                 counterfactual_outputs, _, _ = self.model.forward_with_cls_hidden_reprs(
                     cls_hidden_reprs=base_cls_hidden_state.unsqueeze(dim=1)
                 )
                 counterfactual_logits = torch.nn.functional.softmax(
                         counterfactual_outputs.logits[0].cpu(), dim=-1
-                ).detach()[0]
+                ).detach()
+                
                 # estimate the effect.
                 CPM_iTE = counterfactual_logits-base_logits
-                CPM_iTEs.append(CPM_iTE)
-        CPM_iTEs = torch.concat(CPM_iTEs)
-        CPM_iTEs = np.round(CPM_iTEs.numpy(), decimals=4)
 
-        # only for iit explainer!
-        iit_pairs_dataset["EiCaCE"] = list(CPM_iTEs)
-        CPM_iTEs = list(iit_pairs_dataset.groupby(["iit_id"])["EiCaCE"].mean())
-        
+                for k in range(CPM_iTE.shape[0]):
+                    CPM_iTEs.append(CPM_iTE[k].numpy())
+
+        CPM_iTEs = list(CPM_iTEs)
         return CPM_iTEs
