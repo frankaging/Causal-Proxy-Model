@@ -343,14 +343,7 @@ class CausalMediationModelForBERT(Explainer, CausalExplainer):
         # TODO: dummy code here.
         intervention_type = []
         for _type in iit_pairs_dataset["intervention_type"].tolist():
-            if _type == "ambiance":
-                intervention_type += ["ambiance"]
-            if _type == "food":
-                intervention_type += ["food"]
-            if _type == "noise":
-                intervention_type += ["noise"]
-            if _type == "service":
-                intervention_type += ["service"]
+            intervention_type += [_type]
 
         return base_x, source_x, intervention_type, iit_pairs_dataset
     

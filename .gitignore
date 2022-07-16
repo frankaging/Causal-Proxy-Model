@@ -1,3 +1,6 @@
+cpm_experiments/neuron_alignments/
+cpm_experiments/making_plots.ipynb
+cpm_experiments/figures/
 *results*/
 saved_models/
 evaluation_result/
