@@ -706,11 +706,10 @@ def main():
         # to ensure faireness, we need to adjust the training epoch numbers. i.e., total optimization steps.
         training_args.num_train_epochs *= (len(raw_datasets["train"])/max_train_samples)
             
-    if training_args.do_eval:
-        eval_dataset = raw_datasets[data_args.eval_split_name]
-        if data_args.max_eval_samples is not None:
-            eval_dataset = eval_dataset.select(
-                range(data_args.max_eval_samples))
+    eval_dataset = raw_datasets[data_args.eval_split_name]
+    if data_args.max_eval_samples is not None:
+        eval_dataset = eval_dataset.select(
+            range(data_args.max_eval_samples))
             
     # Log a few random samples from the training set:
     if training_args.do_train:
@@ -737,7 +736,7 @@ def main():
         high_level_model=high_level_model,
         args=training_args,
         train_dataset=train_dataset if training_args.do_train else None,
-        eval_dataset=eval_dataset if training_args.do_eval else None,
+        eval_dataset=eval_dataset,
         query_dataset=query_dataset,
         data_collator=data_collator,
         device=device,

@@ -3,7 +3,7 @@
 # this is unlucky, i have to use gradient_accumulation_steps=2. f!
 for h_dim in 192; do
     for class_num in 5; do
-        for true_counterfactual_c in 50 100 200 272; do
+        for true_counterfactual_c in 1 5; do # 50 100 200 272
             for seed in 42 66 77 88 99; do # 42
                 CUDA_VISIBLE_DEVICES=6,7,8,9 python Proxy_training.py \
                 --tokenizer_name bert-base-uncased \
@@ -12,7 +12,6 @@ for h_dim in 192; do
                 --task_name CEBaB \
                 --dataset_name ./datasets/Proxy.CEBaB.sa.${class_num}-class.exclusive \
                 --do_train \
-                --do_eval \
                 --train_split_name validation \
                 --eval_split_name test \
                 --max_seq_length 128 \
