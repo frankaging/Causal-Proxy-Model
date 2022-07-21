@@ -171,6 +171,10 @@ def cebab_pipeline(
             pairs_dataset,
             train_dataset # for query data.
         )
+        # we also overwrite the dev_report to use cpm model.
+        _, dev_report = explainer.predict_proba(
+            dev_dataset
+        )
     else:
         explanations = explainer.estimate_icace(
             pairs_dataset,

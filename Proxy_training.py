@@ -14,7 +14,7 @@ import copy
 
 import datasets
 import numpy as np
-from datasets import load_dataset, load_metric, load_from_disk
+from datasets import load_dataset, load_metric, load_from_disk, concatenate_datasets
 from sklearn.metrics import classification_report
 
 import transformers
@@ -238,6 +238,13 @@ class ModelArguments:
                     "we use this field to quantify the number of true "\
                     "counterfactuals we use."}
     ) 
+    true_counterfactual_data_augment: bool = field(
+        default=False,
+        metadata={
+            "help": "Whether to include exclusive data when only doing IIT with true counterfactuals."\
+                    "This ensures we have good learning signals for the distillation objective."
+        }
+    ) 
         
     wandb_metadata: str = field(
         default="go:IIT-ABSA",
@@ -275,7 +282,12 @@ class ModelArguments:
             "help": "Whether to performance interchange intervention at all layers."}
     ) 
 
-
+    interchange_hidden_layer: int = field(
+        default=None,
+        metadata={
+            "help": "The interchange layer for transformer-based model. Only BERT work now!"}
+    )
+        
 # In[ ]:
 
 
@@ -338,6 +350,10 @@ def main():
                          f".enc.dropout.{model_args.encoder_dropout}"
         if model_args.true_counterfactual_c is not None:
             sub_output_dir += f".true.cfc.{model_args.true_counterfactual_c}"
+            sub_output_dir += f".aug.cfc.{model_args.true_counterfactual_data_augment}"
+        if model_args.interchange_hidden_layer is not None:
+            sub_output_dir += f".int.layer.{model_args.interchange_hidden_layer}"
+        
     elif training_args.do_eval:
         train_dir = model_args.model_name_or_path.strip("/").split("/")[-1]
         sub_output_dir = f"{train_dir}.eval.{data_args.eval_split_name}.{data_dir_postfix}"
@@ -455,7 +471,11 @@ def main():
     low_level_config.classifier_dropout = model_args.classifier_dropout
     low_level_config.hidden_dropout_prob = model_args.encoder_dropout
     low_level_config.attention_probs_dropout_prob = model_args.encoder_dropout
-    
+    # sanity check.
+    if model_args.interchange_hidden_layer is not None:
+        assert "bert-base-uncased" in model_args.high_level_model_type_or_path
+        low_level_config.interchange_hidden_layer = model_args.interchange_hidden_layer
+        
     if "lstm" in model_args.model_name_or_path:
         low_level_config.update_embeddings=False
         low_level_config.bidirectional=True
@@ -697,15 +717,37 @@ def main():
             train_dataset = train_dataset.filter(
                 lambda example: example['original_id'] in counterfactuals_original_ids
             )
+            if model_args.true_counterfactual_data_augment:
+                logger.info(
+                    "We will include all exclusive training data as well along with "\
+                    "true counterfactuals to ensure a good distillation objective."
+                )
+                # this is the distillation data, which does not contain any true counterfactuals!
+                train_dataset = concatenate_datasets([train_dataset, raw_datasets["train"]])
+                max_train_samples = len(train_dataset)
+                max_exclusive_train_examples = len(raw_datasets["train"])
+                logger.info(
+                    f"Sample with max_train_samples={max_train_samples}"\
+                    f" of the training set with true_counterfactual_c={model_args.true_counterfactual_c}"\
+                    f" out of total {max_original_sentences} original sentences, and including all the"\
+                    f" examples from the exclusive training set={max_exclusive_train_examples}"
+                )
+            else:
+                max_train_samples = len(train_dataset)
+                logger.info(
+                    f"Sample with max_train_samples={max_train_samples}"\
+                    f" of the training set with true_counterfactual_c={model_args.true_counterfactual_c}"\
+                    f" out of total {max_original_sentences} original sentences."
+                )
+        else:
             max_train_samples = len(train_dataset)
             logger.info(
-                f"Sample with max_train_samples={max_train_samples}"\
-                f" of the training set with true_counterfactual_c={model_args.true_counterfactual_c}"\
-                f" out of total {max_original_sentences} original sentences."
+                f"Sample with max_train_samples={max_train_samples}."
             )
+            
         # to ensure faireness, we need to adjust the training epoch numbers. i.e., total optimization steps.
         training_args.num_train_epochs *= (len(raw_datasets["train"])/max_train_samples)
-            
+    
     eval_dataset = raw_datasets[data_args.eval_split_name]
     if data_args.max_eval_samples is not None:
         eval_dataset = eval_dataset.select(

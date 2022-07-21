@@ -650,7 +650,11 @@ class BertEncoder(nn.Module):
         self.layer = nn.ModuleList([BertLayer(config) for _ in range(config.num_hidden_layers)])
         self.gradient_checkpointing = False
         self.intervention_h_dim = config.intervention_h_dim
-
+        try:
+            self.interchange_hidden_layer = config.interchange_hidden_layer
+        except:
+            self.interchange_hidden_layer = 12
+            
     def forward(
         self,
         hidden_states: torch.Tensor,
@@ -724,7 +728,7 @@ class BertEncoder(nn.Module):
                     all_cross_attentions = all_cross_attentions + (layer_outputs[2],)
                     
             # INT_POINT: only the last layer!
-            if base_intervention_corr is not None and source_hidden_states is not None and i == self.config.num_hidden_layers-1:
+            if base_intervention_corr is not None and source_hidden_states is not None and i == self.interchange_hidden_layer-1:
                 for b in range(0, hidden_states.shape[0]):
                     if base_intervention_corr[b] != -1:
                         start_idx = base_intervention_corr[b]*self.intervention_h_dim
@@ -1326,6 +1330,10 @@ class IITBERTForSequenceClassification(BertPreTrainedModel):
             config, num_aspect_labels
         )
         self.intervention_h_dim = config.intervention_h_dim
+        try:
+            self.interchange_hidden_layer = config.interchange_hidden_layer
+        except:
+            self.interchange_hidden_layer = 12
         # Initialize weights and apply final processing
         self.post_init()
 
@@ -1385,11 +1393,12 @@ class IITBERTForSequenceClassification(BertPreTrainedModel):
                 all_layers=all_layers,
                 # counterfactual arguments
                 output_attentions=output_attentions,
-                output_hidden_states=output_hidden_states,
+                # don't give a fuck, just get all of them. it is not optimal!
+                output_hidden_states=True,
                 return_dict=return_dict,
             )
             pooled_output = outputs.pooler_output
-            before_pooled_output = outputs[0][:, 0]
+            before_pooled_output = outputs.hidden_states[self.interchange_hidden_layer][:, 0]
 
         pooled_output = self.dropout(pooled_output)
         logits = self.classifier(pooled_output)

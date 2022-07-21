@@ -111,6 +111,31 @@ class CausalProxyModelForBERT(Explainer, CausalExplainer):
         
         self.tokenizer = AutoTokenizer.from_pretrained("bert-base-uncased")
         
+    def preprocess_predict_proba(self, df):
+        x = self.tokenizer(df['description'].to_list(), padding=True, truncation=True, return_tensors='pt')
+        y = df['review_majority'].astype(int)
+
+        return x, y
+        
+    def predict_proba(self, dataset):
+        self.cpm_model.model.eval()
+
+        x, y = self.preprocess_predict_proba(dataset)
+
+        # get the predictions batch per batch
+        probas = []
+        for i in range(ceil(len(dataset) / self.batch_size)):
+            x_batch = {k: v[i * self.batch_size:(i + 1) * self.batch_size].to(self.device) for k, v in x.items()}
+            probas.append(torch.nn.functional.softmax(self.cpm_model.model(**x_batch).logits[0].cpu(), dim=-1).detach())
+
+        probas = torch.concat(probas)
+        probas = np.round(probas.numpy(), decimals=16)
+
+        predictions = np.argmax(probas, axis=1)
+        clf_report = classification_report(y.to_numpy(), predictions, output_dict=True)
+
+        return probas, clf_report
+        
     def fit(self, dataset, classifier_predictions, classifier, dev_dataset=None):
         # we don't need to train IIT here.
         pass

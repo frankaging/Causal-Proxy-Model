@@ -79,6 +79,7 @@ class CausalProxyModelTrainer:
         self.true_counterfactuals_only = true_counterfactuals_only
         if self.true_counterfactuals_only:
             logger.warning(f"We will only allow true counterfactuals for training.")
+        
         # device
         self.device = device
         self.high_level_model.model.to(self.device)
