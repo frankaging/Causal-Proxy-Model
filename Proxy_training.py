@@ -259,6 +259,12 @@ class ModelArguments:
                     "This ensures we have good learning signals for the distillation objective."
         }
     ) 
+    enforce_num_train_epochs: bool = field(
+        default=False,
+        metadata={
+            "help": "Whether to control for steps and scale epochs number accordingly."
+        }
+    ) 
         
     wandb_metadata: str = field(
         default="go:IIT-ABSA",
@@ -780,12 +786,17 @@ def main():
                 """
                 if len(filtered_train_dataset) > 0:
                     if model_args.true_counterfactual_data_augment_balance:
+                        max_filtered_examples = min(
+                            len(counterfactuals_train_dataset),
+                            len(filtered_train_dataset)
+                        )
                         filtered_train_dataset = filtered_train_dataset.select(
-                            range(len(counterfactuals_train_dataset)))
+                            range(max_filtered_examples))
                     len_filtered_train_dataset = len(filtered_train_dataset)
                     train_dataset = concatenate_datasets([filtered_train_dataset, counterfactuals_train_dataset])
                 else:
                     train_dataset = counterfactuals_train_dataset
+                    len_filtered_train_dataset = 0
                 max_train_samples = len(train_dataset)
                 max_exclusive_train_examples = len(raw_datasets["train"])
                 logger.info(
@@ -808,10 +819,13 @@ def main():
             logger.info(
                 f"Sample with max_train_samples={max_train_samples}."
             )
-            
-        # to ensure faireness, we need to adjust the training epoch numbers. i.e., total optimization steps.
-        training_args.num_train_epochs *= (len(raw_datasets["train"])/max_train_samples)
-    
+        if not model_args.enforce_num_train_epochs:
+            # to ensure faireness, we need to adjust the training epoch numbers. i.e., total optimization steps.
+            training_args.num_train_epochs *= (len(raw_datasets["train"])/max_train_samples)
+        else:
+            # we train whatever we want.
+            pass
+        
     eval_dataset = raw_datasets[data_args.eval_split_name]
     if data_args.max_eval_samples is not None:
         eval_dataset = eval_dataset.select(
