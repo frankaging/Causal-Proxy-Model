@@ -795,7 +795,6 @@ def main():
                     f" examples from the non-repetitive exclusive training set={len_filtered_train_dataset}."
                 )
                 max_train_samples = len(train_dataset)
-                FAIL()
             else:
                 train_dataset = counterfactuals_train_dataset
                 max_train_samples = len(train_dataset)
