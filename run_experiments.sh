@@ -36,7 +36,7 @@
 #     done
 # done
 
-
+# without true_counterfactual_data_augment_balance
 # scripts for doing the few-shot true counterfactual training.
 # here, we only study this for the BERT-model.
 # different from the other experiments, we include the exclusive
@@ -44,17 +44,18 @@
 # this is unlucky, i have to use gradient_accumulation_steps=2. f!
 # for h_dim in 192; do
 #     for class_num in 5; do
-#         for seed in 42 66 77 88 99; do # 42
-#             for true_counterfactual_c in 1 5 50 100 200 272; do # 1 5 50 100 200 272
+#         for seed in 42; do # 42 66 77 88 99
+#             for true_counterfactual_c in 5 50 200 600 1200 1755; do # 5 10 50 500 1000 1755
 #                 CUDA_VISIBLE_DEVICES=1,2,3,4 python Proxy_training.py \
 #                 --tokenizer_name bert-base-uncased \
 #                 --model_name_or_path ./saved_models/bert-base-uncased.opentable.CEBaB.sa.${class_num}-class.exclusive.seed_${seed}/ \
 #                 --high_level_model_type_or_path ./saved_models/bert-base-uncased.opentable.CEBaB.sa.${class_num}-class.exclusive.seed_${seed}/ \
 #                 --task_name CEBaB \
 #                 --dataset_name ./datasets/Proxy.CEBaB.sa.${class_num}-class.exclusive \
+#                 --counterfactual_dataset_name ./datasets/Proxy.CEBaB.sa.${class_num}-class.inclusive \
 #                 --do_train \
-#                 --train_split_name validation \
-#                 --eval_split_name test \
+#                 --train_split_name train \
+#                 --eval_split_name validation \
 #                 --max_seq_length 128 \
 #                 --per_device_train_batch_size 32 \
 #                 --per_device_eval_batch_size 32 \
@@ -80,12 +81,15 @@
 #     done
 # done
 
+# true_counterfactual_data_augment_balance
 # scripts for doing the few-shot true counterfactual training.
 # here, we only study this for the BERT-model.
+# different from the other experiments, we include the exclusive
+# training examples to mark up the distillation objective.
 # this is unlucky, i have to use gradient_accumulation_steps=2. f!
 for h_dim in 192; do
     for class_num in 5; do
-        for seed in 42 66 77 88 99; do # 42
+        for seed in 42; do # 42 66 77 88 99
             for true_counterfactual_c in 5 50 200 600 1200 1755; do # 5 10 50 500 1000 1755
                 CUDA_VISIBLE_DEVICES=1,2,3,4 python Proxy_training.py \
                 --tokenizer_name bert-base-uncased \
@@ -102,7 +106,7 @@ for h_dim in 192; do
                 --per_device_eval_batch_size 32 \
                 --learning_rate 8e-5 \
                 --num_train_epochs 60 \
-                --output_dir ./proxy_training_results/BERT-fewshots-results/ \
+                --output_dir ./proxy_training_results/BERT-fewshots-augment-balance-results/ \
                 --cache_dir ./train_cache/ \
                 --seed ${seed} \
                 --report_to wandb \
@@ -115,11 +119,54 @@ for h_dim in 192; do
                 --intervention_h_dim ${h_dim} \
                 --classifier_dropout 0.1 \
                 --encoder_dropout 0.1 \
-                --true_counterfactual_c ${true_counterfactual_c}
+                --true_counterfactual_c ${true_counterfactual_c} \
+                --true_counterfactual_data_augment \
+                --true_counterfactual_data_augment_balance
             done
         done
     done
 done
+
+# scripts for doing the few-shot true counterfactual training.
+# here, we only study this for the BERT-model.
+# this is unlucky, i have to use gradient_accumulation_steps=2. f!
+# for h_dim in 192; do
+#     for class_num in 5; do
+#         for seed in 42; do # 42 66 77 88 99
+#             for true_counterfactual_c in 5 50 200 600 1200 1755; do # 5 10 50 500 1000 1755
+#                 CUDA_VISIBLE_DEVICES=1,2,3,4 python Proxy_training.py \
+#                 --tokenizer_name bert-base-uncased \
+#                 --model_name_or_path ./saved_models/bert-base-uncased.opentable.CEBaB.sa.${class_num}-class.exclusive.seed_${seed}/ \
+#                 --high_level_model_type_or_path ./saved_models/bert-base-uncased.opentable.CEBaB.sa.${class_num}-class.exclusive.seed_${seed}/ \
+#                 --task_name CEBaB \
+#                 --dataset_name ./datasets/Proxy.CEBaB.sa.${class_num}-class.exclusive \
+#                 --counterfactual_dataset_name ./datasets/Proxy.CEBaB.sa.${class_num}-class.inclusive \
+#                 --do_train \
+#                 --train_split_name train \
+#                 --eval_split_name validation \
+#                 --max_seq_length 128 \
+#                 --per_device_train_batch_size 32 \
+#                 --per_device_eval_batch_size 32 \
+#                 --learning_rate 8e-5 \
+#                 --num_train_epochs 60 \
+#                 --output_dir ./proxy_training_results/BERT-fewshots-results/ \
+#                 --cache_dir ./train_cache/ \
+#                 --seed ${seed} \
+#                 --report_to wandb \
+#                 --wandb_metadata wuzhengx:Causal-Proxy-Model \
+#                 --logging_steps 1 \
+#                 --alpha 1.0 \
+#                 --beta 1.0 \
+#                 --gemma 3.0 \
+#                 --overwrite_output_dir \
+#                 --intervention_h_dim ${h_dim} \
+#                 --classifier_dropout 0.1 \
+#                 --encoder_dropout 0.1 \
+#                 --true_counterfactual_c ${true_counterfactual_c}
+#             done
+#         done
+#     done
+# done
 
 # scripts for gpt2 model main results.
 # for h_dim in 192; do

@@ -252,6 +252,13 @@ class ModelArguments:
                     "This ensures we have good learning signals for the distillation objective."
         }
     ) 
+    true_counterfactual_data_augment_balance: bool = field(
+        default=False,
+        metadata={
+            "help": "Whether to include exclusive data when only doing IIT with true counterfactuals."\
+                    "This ensures we have good learning signals for the distillation objective."
+        }
+    ) 
         
     wandb_metadata: str = field(
         default="go:IIT-ABSA",
@@ -764,17 +771,31 @@ def main():
                 filtered_train_dataset = train_dataset.filter(
                     lambda example: example['id'] not in counterfactuals_ids
                 )
-                len_filtered_train_dataset = len(filtered_train_dataset)
-                train_dataset = concatenate_datasets([filtered_train_dataset, counterfactuals_train_dataset])
+                # some basic dataset balancing!
+                """
+                There is a reason behind this balance.
+                For instance of k=5, we will be sample about 30-50 examples
+                that does not have true counterfactuals from exclusive, they
+                will serve the distillation objective purpose.
+                """
+                if len(filtered_train_dataset) > 0:
+                    if model_args.true_counterfactual_data_augment_balance:
+                        filtered_train_dataset = filtered_train_dataset.select(
+                            range(len(counterfactuals_train_dataset)))
+                    len_filtered_train_dataset = len(filtered_train_dataset)
+                    train_dataset = concatenate_datasets([filtered_train_dataset, counterfactuals_train_dataset])
+                else:
+                    train_dataset = counterfactuals_train_dataset
                 max_train_samples = len(train_dataset)
                 max_exclusive_train_examples = len(raw_datasets["train"])
                 logger.info(
                     f"Sample with max_train_samples={max_train_samples}"\
                     f" of the training set with true_counterfactual_c (k) ={model_args.true_counterfactual_c}"\
                     f" out of total {max_original_sentences} (total k) original sentences, and including all the"\
-                    f" examples from the non-repetitive exclusive training set={len_filtered_train_dataset}"
+                    f" examples from the non-repetitive exclusive training set={len_filtered_train_dataset}."
                 )
                 max_train_samples = len(train_dataset)
+                FAIL()
             else:
                 train_dataset = counterfactuals_train_dataset
                 max_train_samples = len(train_dataset)
