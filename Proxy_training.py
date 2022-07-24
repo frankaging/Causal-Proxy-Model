@@ -265,6 +265,12 @@ class ModelArguments:
             "help": "Whether to control for steps and scale epochs number accordingly."
         }
     ) 
+    enforce_approximate_counterfactual: bool = field(
+        default=False,
+        metadata={
+            "help": "We are training with approximate counterfactuals but with larger epochs."
+        }
+    ) 
         
     wandb_metadata: str = field(
         default="go:IIT-ABSA",
@@ -821,7 +827,27 @@ def main():
             )
         if not model_args.enforce_num_train_epochs:
             # to ensure faireness, we need to adjust the training epoch numbers. i.e., total optimization steps.
-            training_args.num_train_epochs *= (len(raw_datasets["train"])/max_train_samples)
+            if model_args.enforce_approximate_counterfactual:
+                training_args.num_train_epochs *= (max_train_samples/len(raw_datasets["train"]))
+                max_approximate_counterfactual_samples = len(raw_datasets["train"])
+                logger.info(
+                    f"WARNING! We are using the true counterfactual settings to train with approximate "\
+                    f"counterfactual examples! True counterfactual examples={max_train_samples}. "\
+                    f"Approximate counterfactual examples={max_approximate_counterfactual_samples}."
+                )
+                train_dataset = raw_datasets["train"]
+                max_train_samples = len(train_dataset)
+                logger.info(
+                    f"WARNING! We are using the true counterfactual settings to train with approximate "\
+                    f"counterfactual examples! This is for adding a control experiment. We train for epochs="\
+                    f"{training_args.num_train_epochs}, with training examples={max_train_samples}"
+                )
+                logger.info(
+                    f"WARNING! Now setting true_counterfactual_c={model_args.true_counterfactual_c} to None!"
+                )
+                model_args.true_counterfactual_c = None
+            else:
+                training_args.num_train_epochs *= (len(raw_datasets["train"])/max_train_samples)
         else:
             # we train whatever we want.
             pass
