@@ -14,7 +14,7 @@ import copy
 
 import datasets
 import numpy as np
-from datasets import load_dataset, load_metric, load_from_disk
+from datasets import load_dataset, load_metric, load_from_disk, concatenate_datasets
 from sklearn.metrics import classification_report
 
 import transformers
@@ -80,6 +80,13 @@ class DataTrainingArguments:
     )  
     dataset_name: Optional[str] = field(
         default=None, metadata={"help": "The name of the dataset to use (via the datasets library)."}
+    )
+    counterfactual_dataset_name: Optional[str] = field(
+        default=None, metadata={"help": "The name of the dataset to use (via the datasets library)."}
+    )
+    counterfactual_train_split_name: Optional[str] = field(
+        default="train",
+        metadata={"help": "The name of split this is trained on."},
     )
     dataset_config_name: Optional[str] = field(
         default=None, metadata={"help": "The configuration name of the dataset to use (via the datasets library)."}
@@ -238,6 +245,32 @@ class ModelArguments:
                     "we use this field to quantify the number of true "\
                     "counterfactuals we use."}
     ) 
+    true_counterfactual_data_augment: bool = field(
+        default=False,
+        metadata={
+            "help": "Whether to include exclusive data when only doing IIT with true counterfactuals."\
+                    "This ensures we have good learning signals for the distillation objective."
+        }
+    ) 
+    true_counterfactual_data_augment_balance: bool = field(
+        default=False,
+        metadata={
+            "help": "Whether to include exclusive data when only doing IIT with true counterfactuals."\
+                    "This ensures we have good learning signals for the distillation objective."
+        }
+    ) 
+    enforce_num_train_epochs: bool = field(
+        default=False,
+        metadata={
+            "help": "Whether to control for steps and scale epochs number accordingly."
+        }
+    ) 
+    enforce_approximate_counterfactual: bool = field(
+        default=False,
+        metadata={
+            "help": "We are training with approximate counterfactuals but with larger epochs."
+        }
+    ) 
         
     wandb_metadata: str = field(
         default="go:IIT-ABSA",
@@ -275,7 +308,12 @@ class ModelArguments:
             "help": "Whether to performance interchange intervention at all layers."}
     ) 
 
-
+    interchange_hidden_layer: int = field(
+        default=None,
+        metadata={
+            "help": "The interchange layer for transformer-based model. Only BERT work now!"}
+    )
+        
 # In[ ]:
 
 
@@ -338,6 +376,10 @@ def main():
                          f".enc.dropout.{model_args.encoder_dropout}"
         if model_args.true_counterfactual_c is not None:
             sub_output_dir += f".true.cfc.{model_args.true_counterfactual_c}"
+            sub_output_dir += f".aug.cfc.{model_args.true_counterfactual_data_augment}"
+        if model_args.interchange_hidden_layer is not None:
+            sub_output_dir += f".int.layer.{model_args.interchange_hidden_layer}"
+        
     elif training_args.do_eval:
         train_dir = model_args.model_name_or_path.strip("/").split("/")[-1]
         sub_output_dir = f"{train_dir}.eval.{data_args.eval_split_name}.{data_dir_postfix}"
@@ -399,6 +441,25 @@ def main():
         raise ValueError(
             "Need a huggingface datasets formatted directory for `dataset_name`.")
     
+    # Load counterfactual data.
+    raw_counterfactual_datasets = None
+    if data_args.counterfactual_dataset_name is not None and not os.path.isdir(data_args.counterfactual_dataset_name):
+        raw_counterfactual_datasets = load_dataset(
+            data_args.counterfactual_dataset_name,
+            cache_dir="../huggingface_cache/",
+            use_auth_token=True, # we may delete this!
+        )
+    # we should keep using this later, as we want to use the HF dataset!
+    elif data_args.counterfactual_dataset_name is not None and os.path.isdir(data_args.counterfactual_dataset_name):
+        raw_counterfactual_datasets = load_from_disk(
+            data_args.counterfactual_dataset_name,
+        )
+    else:
+        # this is right, it is just counterfactual data.
+        pass
+        
+        
+    
     # we need to filter labels in the train: excluding the no majority cases
     # raw_datasets["train"] = raw_datasets["train"].filter(lambda example: example[label_key]!="no majority")
     
@@ -443,7 +504,7 @@ def main():
         model_constructor = IITBERTForSequenceClassification
     elif "gpt" in model_args.model_name_or_path:
         model_constructor = IITGPT2ForSequenceClassification
-    elif "lstm" in model_args.model_name_or_path:
+    elif "lstm" in model_args.moderaw_counterfactual_datasetsl_name_or_path:
         model_constructor = IITLSTMForSequenceClassification
     else:
         raise ValueError(
@@ -455,7 +516,11 @@ def main():
     low_level_config.classifier_dropout = model_args.classifier_dropout
     low_level_config.hidden_dropout_prob = model_args.encoder_dropout
     low_level_config.attention_probs_dropout_prob = model_args.encoder_dropout
-    
+    # sanity check.
+    if model_args.interchange_hidden_layer is not None:
+        assert "bert-base-uncased" in model_args.high_level_model_type_or_path
+        low_level_config.interchange_hidden_layer = model_args.interchange_hidden_layer
+        
     if "lstm" in model_args.model_name_or_path:
         low_level_config.update_embeddings=False
         low_level_config.bidirectional=True
@@ -642,11 +707,21 @@ def main():
             load_from_cache_file=not data_args.overwrite_cache,
             desc="Running tokenizer on dataset",
         )
-        
     assert len(set(raw_datasets["train"]["id"])) == len(raw_datasets["train"]["id"])
     assert len(set(raw_datasets["validation"]["id"])) == len(raw_datasets["validation"]["id"])
     assert len(set(raw_datasets["test"]["id"])) == len(raw_datasets["test"]["id"])
     all_ids = set(raw_datasets["train"]["id"]).union(set(raw_datasets["validation"]["id"])).union(set(raw_datasets["test"]["id"]))
+    if data_args.counterfactual_dataset_name is not None:
+        all_ids = all_ids.union(raw_counterfactual_datasets["train"]["id"])
+    
+    with training_args.main_process_first(desc="counterfacutal dataset map pre-processing"):
+        raw_counterfactual_datasets = raw_counterfactual_datasets.map(
+            preprocess_function,
+            batched=True,
+            load_from_cache_file=not data_args.overwrite_cache,
+            desc="Running tokenizer on dataset",
+        )
+    
     sequential_id_mapping = {}
     _sequential_id = 0
     for _id in all_ids:
@@ -661,7 +736,10 @@ def main():
         convert_str_to_int,
         desc="Converting str based ids to int based ids",
     )
-    
+    raw_counterfactual_datasets = raw_counterfactual_datasets.map(
+        convert_str_to_int,
+        desc="Converting str based ids to int based ids",
+    )
     if training_args.do_train:
         train_dataset = raw_datasets[data_args.train_split_name]
         """
@@ -686,26 +764,94 @@ def main():
             we give as the training data. all examples in one cluster belong
             to a single original sentences with different counterfactual edits.
             """
-            # a corner case handling
-            max_original_sentences = len(set(train_dataset["original_id"]))
+            counterfactuals_train_dataset = raw_counterfactual_datasets[data_args.counterfactual_train_split_name]
+            max_original_sentences = len(set(counterfactuals_train_dataset["original_id"]))
             if int(model_args.true_counterfactual_c) > max_original_sentences:
                 model_args.true_counterfactual_c = max_original_sentences
             counterfactuals_original_ids = random.sample(
-                list(set(train_dataset["original_id"])), 
+                list(set(counterfactuals_train_dataset["original_id"])), 
                 int(model_args.true_counterfactual_c)
             )
-            train_dataset = train_dataset.filter(
+            # filter based on k.
+            counterfactuals_train_dataset = counterfactuals_train_dataset.filter(
                 lambda example: example['original_id'] in counterfactuals_original_ids
             )
+            
+            if model_args.true_counterfactual_data_augment:
+                # we will add in all the exclusive sentences!
+                counterfactuals_ids = set(counterfactuals_train_dataset["id"])
+                filtered_train_dataset = train_dataset.filter(
+                    lambda example: example['id'] not in counterfactuals_ids
+                )
+                # some basic dataset balancing!
+                """
+                There is a reason behind this balance.
+                For instance of k=5, we will be sample about 30-50 examples
+                that does not have true counterfactuals from exclusive, they
+                will serve the distillation objective purpose.
+                """
+                if len(filtered_train_dataset) > 0:
+                    if model_args.true_counterfactual_data_augment_balance:
+                        max_filtered_examples = min(
+                            len(counterfactuals_train_dataset),
+                            len(filtered_train_dataset)
+                        )
+                        filtered_train_dataset = filtered_train_dataset.select(
+                            range(max_filtered_examples))
+                    len_filtered_train_dataset = len(filtered_train_dataset)
+                    train_dataset = concatenate_datasets([filtered_train_dataset, counterfactuals_train_dataset])
+                else:
+                    train_dataset = counterfactuals_train_dataset
+                    len_filtered_train_dataset = 0
+                max_train_samples = len(train_dataset)
+                max_exclusive_train_examples = len(raw_datasets["train"])
+                logger.info(
+                    f"Sample with max_train_samples={max_train_samples}"\
+                    f" of the training set with true_counterfactual_c (k) ={model_args.true_counterfactual_c}"\
+                    f" out of total {max_original_sentences} (total k) original sentences, and including all the"\
+                    f" examples from the non-repetitive exclusive training set={len_filtered_train_dataset}."
+                )
+                max_train_samples = len(train_dataset)
+            else:
+                train_dataset = counterfactuals_train_dataset
+                max_train_samples = len(train_dataset)
+                logger.info(
+                    f"Sample with max_train_samples={max_train_samples}"\
+                    f" of the training set with true_counterfactual_c (k) ={model_args.true_counterfactual_c}"\
+                    f" out of total {max_original_sentences} (total k) (original sentences)."
+                )
+        else:
             max_train_samples = len(train_dataset)
             logger.info(
-                f"Sample with max_train_samples={max_train_samples}"\
-                f" of the training set with true_counterfactual_c={model_args.true_counterfactual_c}"\
-                f" out of total {max_original_sentences} original sentences."
+                f"Sample with max_train_samples={max_train_samples}."
             )
-        # to ensure faireness, we need to adjust the training epoch numbers. i.e., total optimization steps.
-        training_args.num_train_epochs *= (len(raw_datasets["train"])/max_train_samples)
-            
+        if not model_args.enforce_num_train_epochs:
+            # to ensure faireness, we need to adjust the training epoch numbers. i.e., total optimization steps.
+            if model_args.enforce_approximate_counterfactual:
+                training_args.num_train_epochs *= (max_train_samples/len(raw_datasets["train"]))
+                max_approximate_counterfactual_samples = len(raw_datasets["train"])
+                logger.info(
+                    f"WARNING! We are using the true counterfactual settings to train with approximate "\
+                    f"counterfactual examples! True counterfactual examples={max_train_samples}. "\
+                    f"Approximate counterfactual examples={max_approximate_counterfactual_samples}."
+                )
+                train_dataset = raw_datasets["train"]
+                max_train_samples = len(train_dataset)
+                logger.info(
+                    f"WARNING! We are using the true counterfactual settings to train with approximate "\
+                    f"counterfactual examples! This is for adding a control experiment. We train for epochs="\
+                    f"{training_args.num_train_epochs}, with training examples={max_train_samples}"
+                )
+                logger.info(
+                    f"WARNING! Now setting true_counterfactual_c={model_args.true_counterfactual_c} to None!"
+                )
+                model_args.true_counterfactual_c = None
+            else:
+                training_args.num_train_epochs *= (len(raw_datasets["train"])/max_train_samples)
+        else:
+            # we train whatever we want.
+            pass
+        
     eval_dataset = raw_datasets[data_args.eval_split_name]
     if data_args.max_eval_samples is not None:
         eval_dataset = eval_dataset.select(
