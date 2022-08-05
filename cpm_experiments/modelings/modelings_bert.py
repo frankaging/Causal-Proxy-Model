@@ -126,7 +126,7 @@ class CausalProxyModelForBERT(Explainer, CausalExplainer):
         probas = []
         for i in range(ceil(len(dataset) / self.batch_size)):
             x_batch = {k: v[i * self.batch_size:(i + 1) * self.batch_size].to(self.device) for k, v in x.items()}
-            probas.append(torch.nn.functional.softmax(self.cpm_model.model(**x_batch).logits[0].cpu(), dim=-1).detach())
+            probas.append(self.cpm_model.model(**x_batch).logits[0].cpu().detach())
 
         probas = torch.concat(probas)
         probas = np.round(probas.numpy(), decimals=16)

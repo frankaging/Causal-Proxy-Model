@@ -14,7 +14,7 @@ import copy
 
 import datasets
 import numpy as np
-from datasets import load_dataset, load_metric, load_from_disk, concatenate_datasets
+from datasets import load_dataset, load_metric, load_from_disk, concatenate_datasets, Dataset, DatasetDict
 from sklearn.metrics import classification_report
 
 import transformers
@@ -40,10 +40,10 @@ from models.modelings_roberta import *
 from models.modelings_gpt2 import *
 from models.modelings_lstm import *
 from ProxyTrainer import *
+from eval_pipeline.utils.data_utils import *
 
 # Will error if the minimal version of Transformers is not installed. Remove at your own risks.
 task_to_keys = {
-    "opentable": ("text", None),
     "cebab": ("text", None),
 }
 label_key = "label"
@@ -80,13 +80,6 @@ class DataTrainingArguments:
     )  
     dataset_name: Optional[str] = field(
         default=None, metadata={"help": "The name of the dataset to use (via the datasets library)."}
-    )
-    counterfactual_dataset_name: Optional[str] = field(
-        default=None, metadata={"help": "The name of the dataset to use (via the datasets library)."}
-    )
-    counterfactual_train_split_name: Optional[str] = field(
-        default="train",
-        metadata={"help": "The name of split this is trained on."},
     )
     dataset_config_name: Optional[str] = field(
         default=None, metadata={"help": "The configuration name of the dataset to use (via the datasets library)."}
@@ -209,107 +202,61 @@ class ModelArguments:
     ) 
         
     alpha: float = field(
-        default=0.0,
+        default=1.0,
         metadata={
             "help": "Loss coefficient for the task objective."}
     )
         
     beta: float = field(
-        default=0.0,
+        default=1.0,
         metadata={
             "help": "Loss coefficient for the multitask objective."}
     )
         
     gemma: float = field(
-        default=0.0,
+        default=3.0,
         metadata={
             "help": "Loss coefficient for the IIT objective."}
     )
 
     classifier_dropout: float = field(
-        default=0.0,
+        default=0.1,
         metadata={
             "help": "Whether to set dropout on the IIT classifier."}
     ) 
      
     encoder_dropout: float = field(
-        default=0.0,
+        default=0.1,
         metadata={
             "help": "Whether to set dropout on the IIT classifier."}
     ) 
-        
-    true_counterfactual_c: int = field(
-        default=None,
-        metadata={
-            "help": "In case of training with few-shot of true counterfactuals, "\
-                    "we use this field to quantify the number of true "\
-                    "counterfactuals we use."}
-    ) 
-    true_counterfactual_data_augment: bool = field(
-        default=False,
-        metadata={
-            "help": "Whether to include exclusive data when only doing IIT with true counterfactuals."\
-                    "This ensures we have good learning signals for the distillation objective."
-        }
-    ) 
-    true_counterfactual_data_augment_balance: bool = field(
-        default=False,
-        metadata={
-            "help": "Whether to include exclusive data when only doing IIT with true counterfactuals."\
-                    "This ensures we have good learning signals for the distillation objective."
-        }
-    ) 
-    enforce_num_train_epochs: bool = field(
-        default=False,
-        metadata={
-            "help": "Whether to control for steps and scale epochs number accordingly."
-        }
-    ) 
-    enforce_approximate_counterfactual: bool = field(
-        default=False,
-        metadata={
-            "help": "We are training with approximate counterfactuals but with larger epochs."
-        }
-    ) 
-        
+       
     wandb_metadata: str = field(
         default="go:IIT-ABSA",
         metadata={
             "help": "[username]:[project_name]"},
     )
-        
-    eval_exclude_neutral: bool = field(
-        default=False,
+    
+    k: int = field(
+        default=0,
         metadata={
-            "help": "Whether to exclude neutral class when evaluating."}
+            "help": "In case of training with few-shot of true counterfactuals, "\
+                    "we use this field to quantify the number of true "\
+                    "counterfactuals we use."}
     ) 
- 
+    counterfactual_type: str = field(
+        default="true",
+        metadata={
+            "help": "[true | approximate | mixed]."},
+    )
+        
     intervention_h_dim: int = field(
         default=100,
         metadata={
             "help": "Hidden dimension size to interchange per aspect."}
     )
-        
-    high_level_model_type_or_path: str = field(
-        default="logistic_regression",
-        metadata={
-            "help": "How the high level model infer the correct label."}
-    )
-      
-    mode: str = field(
-        default="align",
-        metadata={
-            "help": "What is the mode of this training."}
-    )
-    
-    all_layers: bool = field(
-        default=False,
-        metadata={
-            "help": "Whether to performance interchange intervention at all layers."}
-    ) 
-
     interchange_hidden_layer: int = field(
-        default=None,
+        default=12,
         metadata={
             "help": "The interchange layer for transformer-based model. Only BERT work now!"}
     )
@@ -318,9 +265,6 @@ class ModelArguments:
 
 
 def main():
-
-    os.environ["TRANSFORMERS_CACHE"] = "../huggingface_cache/"
-    os.environ["WANDB_PROJECT"] = "IIT_ABSA"
 
     # See all possible arguments in src/transformers/training_args.py
     # or by passing the --help flag to this script.
@@ -335,6 +279,8 @@ def main():
             json_file=os.path.abspath(sys.argv[1]))
     else:
         model_args, data_args, training_args = parser.parse_args_into_dataclasses()
+
+    os.environ["TRANSFORMERS_CACHE"] = model_args.cache_dir
 
     # Setup logging
     logging.basicConfig(
@@ -355,7 +301,7 @@ def main():
     
     # make the name shorter.
     # overwrite the output dir a little bit.
-    high_type = "logistic_regression"
+    model_args.high_level_model_type_or_path = model_args.model_name_or_path
     if "roberta-base" in model_args.high_level_model_type_or_path:
         high_type = "roberta-base"
     elif "bert-base-uncased" in model_args.high_level_model_type_or_path:
@@ -364,21 +310,19 @@ def main():
         high_type = "lstm"
     elif "gpt" in model_args.high_level_model_type_or_path:
         high_type = "gpt2"
-    elif "voting" in model_args.high_level_model_type_or_path:
-        high_type = "voting"
+    else:
+        assert False
+
     data_dir_postfix = data_args.dataset_name.strip("/").split("/")[-1]
     if training_args.do_train:
-        sub_output_dir = f"{data_args.task_name}.train.{data_args.train_split_name}"\
+        sub_output_dir = f"{data_args.task_name}"\
                          f".alpha.{model_args.alpha}.beta.{model_args.beta}.gemma.{model_args.gemma}"\
+                         f".lr.{training_args.learning_rate}"\
                          f".dim.{model_args.intervention_h_dim}"\
                          f".hightype.{high_type}.{data_dir_postfix}"\
-                         f".mode.{model_args.mode}.cls.dropout.{model_args.classifier_dropout}"\
-                         f".enc.dropout.{model_args.encoder_dropout}"
-        if model_args.true_counterfactual_c is not None:
-            sub_output_dir += f".true.cfc.{model_args.true_counterfactual_c}"
-            sub_output_dir += f".aug.cfc.{model_args.true_counterfactual_data_augment}"
-        if model_args.interchange_hidden_layer is not None:
-            sub_output_dir += f".int.layer.{model_args.interchange_hidden_layer}"
+                         f".cls.dropout.{model_args.classifier_dropout}"\
+                         f".enc.dropout.{model_args.encoder_dropout}.counter.type.{model_args.counterfactual_type}"\
+                         f".k.{model_args.k}.int.layer.{model_args.interchange_hidden_layer}"
         
     elif training_args.do_eval:
         train_dir = model_args.model_name_or_path.strip("/").split("/")[-1]
@@ -429,7 +373,7 @@ def main():
     if data_args.dataset_name is not None and not os.path.isdir(data_args.dataset_name):
         raw_datasets = load_dataset(
             data_args.dataset_name,
-            cache_dir="../huggingface_cache/",
+            cache_dir=model_args.cache_dir,
             use_auth_token=True, # we may delete this!
         )
     # we should keep using this later, as we want to use the HF dataset!
@@ -440,32 +384,119 @@ def main():
     else:
         raise ValueError(
             "Need a huggingface datasets formatted directory for `dataset_name`.")
-    
-    # Load counterfactual data.
-    raw_counterfactual_datasets = None
-    if data_args.counterfactual_dataset_name is not None and not os.path.isdir(data_args.counterfactual_dataset_name):
-        raw_counterfactual_datasets = load_dataset(
-            data_args.counterfactual_dataset_name,
-            cache_dir="../huggingface_cache/",
-            use_auth_token=True, # we may delete this!
-        )
-    # we should keep using this later, as we want to use the HF dataset!
-    elif data_args.counterfactual_dataset_name is not None and os.path.isdir(data_args.counterfactual_dataset_name):
-        raw_counterfactual_datasets = load_from_disk(
-            data_args.counterfactual_dataset_name,
-        )
+    if "2-class" in model_args.model_name_or_path:
+        dataset_type = "2-way"
+    elif "3-class" in model_args.model_name_or_path:
+        dataset_type = "3-way"
+    elif "5-class" in model_args.model_name_or_path:
+        dataset_type = "5-way"
     else:
-        # this is right, it is just counterfactual data.
-        pass
-        
-        
+        assert False
+    (train_exclusive, train_inclusive), eval_dataset, test_dataset = preprocess_hf_dataset_inclusive(
+        raw_datasets, verbose=1, dataset_type=dataset_type
+    )
+    assert model_args.counterfactual_type in {"true", "approximate"}
+    train_dataset, train_pairs_dataset = get_train_singles_and_pairs(
+        train_exclusive, train_inclusive, 
+        training_args.seed, model_args.k, 
+        dataset_type=dataset_type,
+        approximate=True if model_args.counterfactual_type == "approximate" else False
+    )
+    # do some special column filtering and renaming!
+    train_columns_to_keep = [
+        'original_id', 'edit_id', 'is_original', 
+        'description', 'review_majority',
+        'food_aspect_majority', 'ambiance_aspect_majority', 
+        'service_aspect_majority', 'noise_aspect_majority'
+    ]
+    aspect_label_encode = {
+        "Negative":0,
+        "Positive":1,
+        "unknown":2,
+        "no majority": 2,
+    }
+    aspect_encode = {
+        "ambiance":0,
+        "food":1,
+        "noise":2,
+        "service": 3,
+    }
+    new_dfs = []
+    for _df in [train_dataset, eval_dataset, test_dataset]:
+        _df = _df[train_columns_to_keep].rename(
+            columns={
+                'description': 'text', 
+                'review_majority': 'label',
+                'food_aspect_majority': 'food_label',
+                'ambiance_aspect_majority': 'ambiance_label',
+                'service_aspect_majority': 'service_label',
+                'noise_aspect_majority': 'noise_label'
+            }
+        )
+        _df = _df.replace("", -1).replace(
+            {
+                "food_label": aspect_label_encode,
+                "ambiance_label": aspect_label_encode,
+                "service_label": aspect_label_encode,
+                "noise_label": aspect_label_encode
+            }
+        )
+        new_dfs += [_df]
+    train_dataset, eval_dataset, test_dataset = new_dfs[0], new_dfs[1], new_dfs[2]
     
-    # we need to filter labels in the train: excluding the no majority cases
-    # raw_datasets["train"] = raw_datasets["train"].filter(lambda example: example[label_key]!="no majority")
-    
-    label_list = sorted(list(set(raw_datasets["train"][label_key]).union(
-        set(raw_datasets["validation"][label_key]))))
-        
+    train_pairs_columns_to_keep = [
+        "original_id_base", "edit_id_base", "edit_id_counterfactual",
+        "description_base", 
+        "description_counterfactual", "intervention_type",
+        "intervention_aspect_counterfactual",
+        'food_aspect_majority_base', 'ambiance_aspect_majority_base', 
+        'service_aspect_majority_base', 'noise_aspect_majority_base',
+        'food_aspect_majority_counterfactual', 'ambiance_aspect_majority_counterfactual', 
+        'service_aspect_majority_counterfactual', 'noise_aspect_majority_counterfactual',
+    ]
+    train_pairs_dataset = train_pairs_dataset[train_pairs_columns_to_keep].rename(
+        columns={
+            'description_base': 'text', 
+            'review_majority_base': 'label',
+            'original_id_base': 'original_id',
+            'description_counterfactual': 'text_counterfactual', 
+            'intervention_type': 'intervention_aspect',
+            'intervention_aspect_counterfactual': 'intervention_aspect_label',
+            'food_aspect_majority_base': 'food_label_base',
+            'ambiance_aspect_majority_base': 'ambiance_label_base',
+            'service_aspect_majority_base': 'service_label_base',
+            'noise_aspect_majority_base': 'noise_label_base',
+            'food_aspect_majority_counterfactual': 'food_label_counterfactual',
+            'ambiance_aspect_majority_counterfactual': 'ambiance_label_counterfactual',
+            'service_aspect_majority_counterfactual': 'service_label_counterfactual',
+            'noise_aspect_majority_counterfactual': 'noise_label_counterfactual'
+        }
+    )
+    train_pairs_dataset = train_pairs_dataset.replace("", -1).replace(
+        {
+            "intervention_aspect": aspect_encode,
+            "intervention_aspect_label": aspect_label_encode,
+            "food_label_base": aspect_label_encode,
+            "ambiance_label_base": aspect_label_encode,
+            "service_label_base": aspect_label_encode,
+            "noise_label_base": aspect_label_encode,
+            "food_label_counterfactual": aspect_label_encode,
+            "ambiance_label_counterfactual": aspect_label_encode,
+            "service_label_counterfactual": aspect_label_encode,
+            "noise_label_counterfactual": aspect_label_encode
+        }
+    )
+    train_dataset = Dataset.from_pandas(train_dataset)
+    train_pairs_dataset = Dataset.from_pandas(train_pairs_dataset)
+    eval_dataset = Dataset.from_pandas(eval_dataset)
+    test_dataset = Dataset.from_pandas(test_dataset)
+    raw_datasets = DatasetDict()
+    raw_datasets['train'] = train_dataset
+    raw_datasets['train_pairs'] = train_pairs_dataset
+    raw_datasets['validation'] = eval_dataset
+    raw_datasets['test'] = test_dataset
+
+    label_list = sorted(list(set(train_dataset[label_key])))
     num_labels = len(label_list)
     
     # Load pretrained model and tokenizer
@@ -475,7 +506,13 @@ def main():
     if "lstm" in model_args.model_name_or_path:
         model_args.config_name = "bert-base-uncased"
         model_args.tokenizer_name = "bert-base-uncased"
-    
+    elif "bert-base-uncased" in model_args.model_name_or_path:
+        model_args.tokenizer_name = "bert-base-uncased"
+    elif "roberta-base" in model_args.model_name_or_path:
+        model_args.tokenizer_name = "roberta-base"
+    elif "gpt2" in model_args.model_name_or_path:
+        model_args.tokenizer_name = "gpt2"
+        
     config = AutoConfig.from_pretrained(
         model_args.config_name if model_args.config_name else model_args.model_name_or_path,
         num_labels=num_labels,
@@ -517,8 +554,7 @@ def main():
     low_level_config.hidden_dropout_prob = model_args.encoder_dropout
     low_level_config.attention_probs_dropout_prob = model_args.encoder_dropout
     # sanity check.
-    if model_args.interchange_hidden_layer is not None:
-        assert "bert-base-uncased" in model_args.high_level_model_type_or_path
+    if "bert-base-uncased" in model_args.high_level_model_type_or_path:
         low_level_config.interchange_hidden_layer = model_args.interchange_hidden_layer
         
     if "lstm" in model_args.model_name_or_path:
@@ -559,7 +595,6 @@ def main():
             
     low_level_model = InterventionableIITTransformerForSequenceClassification(
         model=model,
-        all_layers=model_args.all_layers
     )
     
     if "bert" in model_args.high_level_model_type_or_path or \
@@ -588,7 +623,6 @@ def main():
             
         high_level_model = InterventionableIITTransformerForSequenceClassification(
             model=high_level_model,
-            all_layers=model_args.all_layers
         )
     elif "lstm" in model_args.model_name_or_path:
         config.update_embeddings=False
@@ -613,29 +647,9 @@ def main():
             high_level_model.lstm.embeddings.word_embeddings.weight.data = fasttext_embeddings
         high_level_model = InterventionableIITTransformerForSequenceClassification(
             model=high_level_model,
-            all_layers=model_args.all_layers
         )
     else:
-        high_level_model = InterventionableAbstractionModelForABSA(
-            model=AbstractionModelForABSA(
-                model_type=model_args.high_level_model_type_or_path,
-            ),
-        )
-    
-    # Preprocessing the raw_datasets
-    if data_args.task_name is not None:
-        sentence1_key, sentence2_key = task_to_keys[data_args.task_name]
-    else:
-        # Again, we try to have some nice defaults but don't hesitate to tweak to your use case.
-        non_label_column_names = [
-            name for name in raw_datasets["train"].column_names if name != label_key]
-        if "sentence1" in non_label_column_names and "sentence2" in non_label_column_names:
-            sentence1_key, sentence2_key = "sentence1", "sentence2"
-        else:
-            if len(non_label_column_names) >= 2:
-                sentence1_key, sentence2_key = non_label_column_names[:2]
-            else:
-                sentence1_key, sentence2_key = non_label_column_names[0], None
+        assert False
 
     # Padding strategy
     if data_args.pad_to_max_length:
@@ -687,12 +701,17 @@ def main():
     
     def preprocess_function(examples):
         # Tokenize the texts
-        args = (
-            (examples[sentence1_key],) if sentence2_key is None else (
-                examples[sentence1_key], examples[sentence2_key])
-        )
-        result = tokenizer(*args, padding=padding,
-                           max_length=max_seq_length, truncation=True)
+        if 'text_counterfactual' in examples:
+            result = tokenizer(examples['text'], padding=padding,
+                               max_length=max_seq_length, truncation=True)
+            result_counterfactual = tokenizer(examples['text_counterfactual'], padding=padding,
+                               max_length=max_seq_length, truncation=True)
+            result["input_ids_counterfactual"] = result_counterfactual["input_ids"]
+            result["token_type_ids_counterfactual"] = result_counterfactual["token_type_ids"]
+            result["attention_mask_counterfactual"] = result_counterfactual["attention_mask"]
+        else:
+            result = tokenizer(examples['text'], padding=padding,
+                               max_length=max_seq_length, truncation=True)
 
         # Map labels to IDs (not necessary for GLUE tasks)
         if label_to_id is not None and label_key in examples:
@@ -707,151 +726,22 @@ def main():
             load_from_cache_file=not data_args.overwrite_cache,
             desc="Running tokenizer on dataset",
         )
-    assert len(set(raw_datasets["train"]["id"])) == len(raw_datasets["train"]["id"])
-    assert len(set(raw_datasets["validation"]["id"])) == len(raw_datasets["validation"]["id"])
-    assert len(set(raw_datasets["test"]["id"])) == len(raw_datasets["test"]["id"])
-    all_ids = set(raw_datasets["train"]["id"]).union(set(raw_datasets["validation"]["id"])).union(set(raw_datasets["test"]["id"]))
-    if data_args.counterfactual_dataset_name is not None:
-        all_ids = all_ids.union(raw_counterfactual_datasets["train"]["id"])
-    
-    with training_args.main_process_first(desc="counterfacutal dataset map pre-processing"):
-        raw_counterfactual_datasets = raw_counterfactual_datasets.map(
-            preprocess_function,
-            batched=True,
-            load_from_cache_file=not data_args.overwrite_cache,
-            desc="Running tokenizer on dataset",
-        )
-    
-    sequential_id_mapping = {}
-    _sequential_id = 0
-    for _id in all_ids:
-        sequential_id_mapping[_id] = _sequential_id
-        _sequential_id += 1
-    def convert_str_to_int(examples):
-        examples["original_id"] = int(examples["original_id"])
-        examples["edit_id"] = int(examples["edit_id"])
-        examples["id"] = sequential_id_mapping[examples["id"]]
-        return examples
-    raw_datasets = raw_datasets.map(
-        convert_str_to_int,
-        desc="Converting str based ids to int based ids",
-    )
-    raw_counterfactual_datasets = raw_counterfactual_datasets.map(
-        convert_str_to_int,
-        desc="Converting str based ids to int based ids",
-    )
+
     if training_args.do_train:
-        train_dataset = raw_datasets[data_args.train_split_name]
+        train_dataset = raw_datasets["train_pairs"]
         """
-        The following line is actually crucial!
-        
-        For now, my thinking is that we always have the training
-        dataset as the query set at least.
-        
-        The useage of the query set should be very specific:
-        this is, to query any sentence (randomly) with desired
-        concept label distribution. Nothing more. You should never
-        expect you can query out a true counterfactual. In fact,
-        that should never work! Unless you explicitly set it to be.
+        We use the query dataset to pull out approximate counterfactuals,
+        or some source examples for doing interchange interventions.
         """
         query_dataset = raw_datasets["train"]
         if data_args.max_train_samples is not None:
             train_dataset = train_dataset.select(
                 range(data_args.max_train_samples))
-        elif model_args.true_counterfactual_c is not None:
-            """
-            true_counterfactual_c represents how many clustered example sets
-            we give as the training data. all examples in one cluster belong
-            to a single original sentences with different counterfactual edits.
-            """
-            counterfactuals_train_dataset = raw_counterfactual_datasets[data_args.counterfactual_train_split_name]
-            max_original_sentences = len(set(counterfactuals_train_dataset["original_id"]))
-            if int(model_args.true_counterfactual_c) > max_original_sentences:
-                model_args.true_counterfactual_c = max_original_sentences
-            counterfactuals_original_ids = random.sample(
-                list(set(counterfactuals_train_dataset["original_id"])), 
-                int(model_args.true_counterfactual_c)
+        max_train_samples = len(train_dataset)
+        logger.info(
+            f"Sample with max_train_samples={max_train_samples}."
             )
-            # filter based on k.
-            counterfactuals_train_dataset = counterfactuals_train_dataset.filter(
-                lambda example: example['original_id'] in counterfactuals_original_ids
-            )
-            
-            if model_args.true_counterfactual_data_augment:
-                # we will add in all the exclusive sentences!
-                counterfactuals_ids = set(counterfactuals_train_dataset["id"])
-                filtered_train_dataset = train_dataset.filter(
-                    lambda example: example['id'] not in counterfactuals_ids
-                )
-                # some basic dataset balancing!
-                """
-                There is a reason behind this balance.
-                For instance of k=5, we will be sample about 30-50 examples
-                that does not have true counterfactuals from exclusive, they
-                will serve the distillation objective purpose.
-                """
-                if len(filtered_train_dataset) > 0:
-                    if model_args.true_counterfactual_data_augment_balance:
-                        max_filtered_examples = min(
-                            len(counterfactuals_train_dataset),
-                            len(filtered_train_dataset)
-                        )
-                        filtered_train_dataset = filtered_train_dataset.select(
-                            range(max_filtered_examples))
-                    len_filtered_train_dataset = len(filtered_train_dataset)
-                    train_dataset = concatenate_datasets([filtered_train_dataset, counterfactuals_train_dataset])
-                else:
-                    train_dataset = counterfactuals_train_dataset
-                    len_filtered_train_dataset = 0
-                max_train_samples = len(train_dataset)
-                max_exclusive_train_examples = len(raw_datasets["train"])
-                logger.info(
-                    f"Sample with max_train_samples={max_train_samples}"\
-                    f" of the training set with true_counterfactual_c (k) ={model_args.true_counterfactual_c}"\
-                    f" out of total {max_original_sentences} (total k) original sentences, and including all the"\
-                    f" examples from the non-repetitive exclusive training set={len_filtered_train_dataset}."
-                )
-                max_train_samples = len(train_dataset)
-            else:
-                train_dataset = counterfactuals_train_dataset
-                max_train_samples = len(train_dataset)
-                logger.info(
-                    f"Sample with max_train_samples={max_train_samples}"\
-                    f" of the training set with true_counterfactual_c (k) ={model_args.true_counterfactual_c}"\
-                    f" out of total {max_original_sentences} (total k) (original sentences)."
-                )
-        else:
-            max_train_samples = len(train_dataset)
-            logger.info(
-                f"Sample with max_train_samples={max_train_samples}."
-            )
-        if not model_args.enforce_num_train_epochs:
-            # to ensure faireness, we need to adjust the training epoch numbers. i.e., total optimization steps.
-            if model_args.enforce_approximate_counterfactual:
-                training_args.num_train_epochs *= (max_train_samples/len(raw_datasets["train"]))
-                max_approximate_counterfactual_samples = len(raw_datasets["train"])
-                logger.info(
-                    f"WARNING! We are using the true counterfactual settings to train with approximate "\
-                    f"counterfactual examples! True counterfactual examples={max_train_samples}. "\
-                    f"Approximate counterfactual examples={max_approximate_counterfactual_samples}."
-                )
-                train_dataset = raw_datasets["train"]
-                max_train_samples = len(train_dataset)
-                logger.info(
-                    f"WARNING! We are using the true counterfactual settings to train with approximate "\
-                    f"counterfactual examples! This is for adding a control experiment. We train for epochs="\
-                    f"{training_args.num_train_epochs}, with training examples={max_train_samples}"
-                )
-                logger.info(
-                    f"WARNING! Now setting true_counterfactual_c={model_args.true_counterfactual_c} to None!"
-                )
-                model_args.true_counterfactual_c = None
-            else:
-                training_args.num_train_epochs *= (len(raw_datasets["train"])/max_train_samples)
-        else:
-            # we train whatever we want.
-            pass
-        
+
     eval_dataset = raw_datasets[data_args.eval_split_name]
     if data_args.max_eval_samples is not None:
         eval_dataset = eval_dataset.select(
@@ -890,10 +780,6 @@ def main():
         beta=model_args.beta,
         gemma=model_args.gemma,
         wandb_metadata=model_args.wandb_metadata,
-        eval_exclude_neutral=model_args.eval_exclude_neutral,
-        high_level_model_type=model_args.high_level_model_type_or_path,
-        mode=model_args.mode,
-        true_counterfactuals_only=True if model_args.true_counterfactual_c is not None else False,
     )
     
     if training_args.do_train:

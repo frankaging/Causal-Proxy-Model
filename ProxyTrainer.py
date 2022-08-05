@@ -1,41 +1,6 @@
-import os
-import random
-import pickle
-import time
-import psutil
-import wandb
-
-import numpy as np
-import torch
-from torch.utils.data import RandomSampler, SequentialSampler
-from tqdm import tqdm, trange
-import torch
-from torch import nn
-from torch.nn import BCEWithLogitsLoss, CrossEntropyLoss, MSELoss
-from torch.optim import AdamW
-from torch.utils.data import BatchSampler, DataLoader, RandomSampler
-from torch.utils.data.distributed import DistributedSampler
-from tqdm import tqdm
-import inspect
-import datasets
-from sklearn.metrics import classification_report
-
-from models.modelings_abstraction import *
-from models.modelings_roberta import *
-
-from utils.optimization import *
-from transformers.optimization import AdamW, Adafactor, get_scheduler
-from transformers.trainer_pt_utils import (
-    get_parameter_names,
-)
-
-import logging
-logging.basicConfig(format='%(asctime)s - %(levelname)s - %(name)s -   %(message)s',
-                    datefmt='%m/%d/%Y %H:%M:%S',
-                    level=logging.INFO)
-logger = logging.getLogger(__name__)
-
-class CausalProxyModelTrainer:
+from Trainer import *
+        
+class CausalProxyModelTrainer(Trainer):
     def __init__(
         self, 
         low_level_model, 
@@ -48,38 +13,25 @@ class CausalProxyModelTrainer:
         device,
         alpha, beta, gemma,
         wandb_metadata,
-        eval_exclude_neutral,
-        high_level_model_type,
-        mode,
-        true_counterfactuals_only,
     ):
+        super(CausalProxyModelTrainer, self).__init__(args, wandb_metadata)
+        
         self.args = args
         self.train_dataset = train_dataset
-        self.secondary_train_dataset = train_dataset.data.to_pandas()
-        self.query_dataset = query_dataset.data.to_pandas()
         self.eval_dataset = eval_dataset
-        self.secondary_eval_dataset = eval_dataset.data.to_pandas()
+        self.query_dataset = query_dataset
         self.low_level_model = low_level_model
         self.high_level_model = high_level_model
         self.data_collator = data_collator
-        
         self.alpha = alpha
         self.beta = beta
         self.gemma = gemma
-        self.gemma_cosine = gemma
-        
-        self.alpha_step = self.alpha/self.args.num_train_epochs
-        self.beta_step = self.beta/self.args.num_train_epochs
-        
-        self.eval_exclude_neutral = eval_exclude_neutral
-        self.high_level_model_type = high_level_model_type
-        
-        self.mode = mode
-        
-        self.true_counterfactuals_only = true_counterfactuals_only
-        if self.true_counterfactuals_only:
-            logger.warning(f"We will only allow true counterfactuals for training.")
-        
+        self.aspect_encode = {
+            0: "ambiance",
+            1: "food",
+            2: "noise",
+            3: "service",
+        }
         # device
         self.device = device
         self.high_level_model.model.to(self.device)
@@ -87,29 +39,7 @@ class CausalProxyModelTrainer:
         if self.args.n_gpu > 1:
             self.high_level_model.model = torch.nn.DataParallel(self.high_level_model.model)
             self.low_level_model.model = torch.nn.DataParallel(self.low_level_model.model)
-        
-        self._signature_columns = None
-        
-        self.last_loss = 0.0
-        self.total_loss_epoch = 0.0
-        self.n_iter = 0
-        self.epoch = 0
-        self.n_total_iter = 0
-        self.last_log = 0
-        self.lr_this_step = 0.0
-        self.n_sequences_epoch = 0
-        self.n_effective_aspect_sequence_epoch = 0
-        self.n_effective_iit_sequence_epoch = 0
-        
-        if "wandb" in self.args.report_to:
-            import wandb
-            run = wandb.init(
-                project=wandb_metadata.split(":")[-1], 
-                entity=wandb_metadata.split(":")[0],
-                name=self.args.run_name,
-            )
-            wandb.config.update(self.args)
-        
+
         if self.args.n_gpu > 1:
             self.train_batch_size = args.per_device_train_batch_size * self.args.n_gpu
             self.eval_batch_size = args.per_device_eval_batch_size * self.args.n_gpu
@@ -160,93 +90,87 @@ class CausalProxyModelTrainer:
                 num_training_steps=num_train_optimization_steps,
             )
             self.lr_this_step = self.optimizer.param_groups[0]['lr']
+        
+        # for the query dataset, we also do the same
+        updated_query_dataset = query_dataset.data.to_pandas()
+        any_batch_size = 1024
+        with torch.no_grad():
+            logger.info("***** Pre-calculating forward results on query set to save training time *****")
+            probas_query = []
+            query_dataloader = self.get_any_dataloader(
+                self.query_dataset, any_batch_size=any_batch_size
+            )
+            iter_bar = tqdm(query_dataloader, desc="-Iter", disable=False)
+            for batch in iter_bar:
+                input_ids = batch["input_ids"].to(self.device)
+                attention_mask = batch["attention_mask"].to(self.device)
+                probas_query.append(torch.nn.functional.softmax(self.high_level_model.model(
+                    input_ids = input_ids,
+                    attention_mask = attention_mask
+                ).logits[0].cpu(), dim=-1).detach())
+            probas_query = torch.concat(probas_query)
+            probas_query = np.round(probas_query.numpy(), decimals=16)
+            updated_query_dataset["probas"] = list(probas_query)
+        self.query_dataset = updated_query_dataset
+        
+        updated_train_dataset = self.train_dataset.to_pandas()
+        # Make prediction with high level model first.
+        with torch.no_grad():
+            logger.info("***** Pre-calculating forward results on training set to save training time *****")
+            self.high_level_model.model.eval()
+            probas_base = []
+            train_dataloader = self.get_any_dataloader(
+                self.train_dataset, any_batch_size=any_batch_size
+            )
+            iter_bar = tqdm(train_dataloader, desc="-Iter", disable=False)
+            for batch in iter_bar:
+                input_ids = batch["input_ids"].to(self.device)
+                attention_mask = batch["attention_mask"].to(self.device)
+                probas_base.append(torch.nn.functional.softmax(self.high_level_model.model(
+                    input_ids = input_ids,
+                    attention_mask = attention_mask
+                ).logits[0].cpu(), dim=-1).detach())
+            probas_base = torch.concat(probas_base)
+            probas_base = np.round(probas_base.numpy(), decimals=16)
+            updated_train_dataset["probas_base"] = list(probas_base)
             
-            # the high level model is trainable as well.
-            self.high_level_model_optimizer = torch.optim.SGD(
-                self.high_level_model.model.parameters(), lr=0.01
-            ) 
+            probas_counterfactual = []
+            train_dataloader = self.get_any_dataloader(
+                self.train_dataset, any_batch_size=any_batch_size
+            )
+            iter_bar = tqdm(train_dataloader, desc="-Iter", disable=False)
+            for batch in iter_bar:
+                input_ids_counterfactual = batch["input_ids_counterfactual"].to(self.device)
+                attention_mask_counterfactual = batch["attention_mask_counterfactual"].to(self.device)
+                probas_counterfactual.append(torch.nn.functional.softmax(self.high_level_model.model(
+                    input_ids = input_ids_counterfactual,
+                    attention_mask = attention_mask_counterfactual
+                ).logits[0].cpu(), dim=-1).detach())
+            probas_counterfactual = torch.concat(probas_counterfactual)
+            probas_counterfactual = np.round(probas_counterfactual.numpy(), decimals=16)
+            updated_train_dataset["probas_counterfactual"] = list(probas_counterfactual)
+        self.train_dataset = Dataset.from_pandas(updated_train_dataset)
+        
+        # lets do some garbage collection.
+        self.high_level_model.model.to("cpu")
+        self.high_level_model.model = None
+        torch.cuda.empty_cache()
+        
+    def get_any_dataloader(self, dataset, any_batch_size=128):
+        if self.query_dataset is None:
+            raise ValueError("Trainer: query requires a query_dataset.")
 
-        self.ce_loss_fct = nn.KLDivLoss(reduction="batchmean")
-        self.cosine_loss_fct = nn.CosineEmbeddingLoss(reduction="mean")
-            
-        # last.
-        self.total_loss_epoch = 0
-        self.last_loss = 0.0
-        self.last_seq_cls_loss = 0.0
-        self.last_mul_cls_loss = 0.0
-        self.last_iit_cls_loss = 0.0
+        dataset = self._remove_unused_columns(dataset, description="evaluation")
+        return DataLoader(
+            dataset,
+            sampler=SequentialSampler(dataset),
+            batch_size=any_batch_size,
+            collate_fn=self.data_collator,
+            drop_last=self.args.dataloader_drop_last,
+            num_workers=self.args.dataloader_num_workers,
+            pin_memory=self.args.dataloader_pin_memory,
+        )
         
-        self.last_seq_cls_acc = 1.0/5
-        self.last_mul_cls_acc = 1.0/3
-        self.last_iit_cls_acc = 1.0/5
-        
-        self.last_effective_intervention = 0.0
-        self.last_low_label_shifts_count = 0.0
-        self.last_base_source_label_shifts_count = 0.0
-        
-        # accumulated.
-        self.accumulated_loss = 0.0
-        self.accumulated_seq_cls_loss = 0.0
-        self.accumulated_mul_cls_loss = 0.0
-        self.accumulated_iit_cls_loss = 0.0
-        
-        self.accumulated_seq_cls_count = 0
-        self.accumulated_mul_cls_count = 0
-        self.accumulated_iit_cls_count = 0
-
-        
-        # averaged.
-        self.averaged_loss = 0.0
-        self.averaged_seq_cls_loss = 0.0
-        self.averaged_mul_cls_loss = 0.0
-        self.averaged_iit_cls_loss = 0.0
-        
-        self.averaged_seq_cls_acc = 1.0/5
-        self.averaged_mul_cls_acc = 1.0/3
-        self.averaged_iit_cls_acc = 1.0/5
-        
-        # log to a local file
-        log_train = open(os.path.join(self.args.output_dir, 'train_log.txt'), 'w', buffering=1)
-        log_eval = open(os.path.join(self.args.output_dir, 'eval_log.txt'), 'w', buffering=1)
-        print('epoch,global_steps,step,loss,seq_cls_loss,mul_cls_loss,iit_cls_loss,seq_cls_acc,mul_cls_acc,iit_cls_acc', file=log_train)
-        print('epoch,loss,seq_cls_loss,mul_cls_loss,iit_cls_loss,seq_cls_acc,mul_cls_acc,iit_cls_acc', file=log_eval)
-        log_train.close()
-        log_eval.close()
-        
-    def _get_interchange_mask_true_counterfactual(
-        self,
-        base_aspect_labels,
-        source_aspect_labels,
-    ):
-        intervention_mask = torch.zeros_like(base_aspect_labels).bool()
-        intervention_corr = []
-        
-        for i in range(0, base_aspect_labels.shape[0]):
-            mismatch_indices = (
-                (base_aspect_labels[i]!=-1)&(source_aspect_labels[i]!=-1)&\
-                (base_aspect_labels[i]!=source_aspect_labels[i])
-            ).nonzero(as_tuple=False)
-            if len(mismatch_indices) != 0:
-                # it means we mismatched places, it means we need to sample from them.
-                chosen_index = np.random.choice(mismatch_indices.flatten())
-                intervention_corr += [chosen_index]
-                intervention_mask[i, chosen_index] = True
-            else:
-                # it means we sample the exact same sequence. this is okay, as we need
-                # to learn when the logits should not change.
-                nonzero_indices = (
-                    (base_aspect_labels[i]!=-1)&(source_aspect_labels[i]!=-1)
-                ).nonzero(as_tuple=False)
-                if len(nonzero_indices) != 0:
-                    chosen_index = np.random.choice(nonzero_indices.flatten())
-                    intervention_corr += [chosen_index]
-                    intervention_mask[i, chosen_index] = True
-                else:
-                    intervention_corr += [-1]
-
-        return intervention_mask, intervention_mask, \
-            torch.tensor(intervention_corr), torch.tensor(intervention_corr)
-    
     def _get_interchange_mask(
         self,
         base_aspect_labels,
@@ -271,654 +195,116 @@ class CausalProxyModelTrainer:
         
     def prepare_batch(
         self,
-        input_ids, attention_mask, labels, aspect_labels,
-        original_ids, ids,
-        batch_type="train"
+        batch
     ):
-        if self.true_counterfactuals_only:
-            """
-            Using Only True Counterfactuls.
-            
-            Steps:
-            1. from the base example, select a true counterfactual 
-               based on original_id.
-            2. randomly decide an intervention site (i.e., concept)
-            3. then backfill the source example by selecting an 
-               example with desired label for the intervening concept.
-            """
-            
-            # sample a true counterfactual
-            counterfactual_input_ids = []
-            counterfactual_ids = []
-            counterfactual_attention_mask = []
-            counterfactual_aspect_labels = []
-            counterfactual_masks = []
-            for i in range(0, aspect_labels.shape[0]):
-                if batch_type == "train":
-                    satisfied_counterfactuals = self.secondary_train_dataset[
-                        # when matching with ids, need to turn it into a int.
-                        (self.secondary_train_dataset["original_id"]==int(original_ids[i]))
-                    ]
-                elif batch_type == "eval":
-                    satisfied_counterfactuals = self.secondary_eval_dataset[
-                        # when matching with ids, need to turn it into a int.
-                        (self.secondary_eval_dataset["original_id"]==int(original_ids[i]))
-                    ]
-                
-                if len(satisfied_counterfactuals) > 0:
-                    sampled_counterfactual = satisfied_counterfactuals.sample().iloc[0]
-                    counterfactual_input_ids += [sampled_counterfactual["input_ids"]]
-                    counterfactual_attention_mask += [sampled_counterfactual["attention_mask"]]
-                    counterfactual_aspect_labels += [[
-                        sampled_counterfactual["ambiance_label"], sampled_counterfactual["food_label"], 
-                        sampled_counterfactual["noise_label"], sampled_counterfactual["service_label"]
-                    ]]
-                    counterfactual_masks += [True]
-                    counterfactual_ids += [sampled_counterfactual["id"]]
-                else:
-                    # this shall never happen! since we always assume
-                    # we can at least sample a counterfactual.
-                    counterfactual_input_ids += [input_ids[i].tolist()]
-                    counterfactual_attention_mask += [attention_mask[i].tolist()]
-                    counterfactual_aspect_labels += [aspect_labels[i].tolist()]
-                    counterfactual_masks += [False]
-                    counterfactual_ids += ["not_exist"]
-                    
-            counterfactual_input_ids = torch.tensor(counterfactual_input_ids).long()
-            counterfactual_attention_mask = torch.tensor(counterfactual_attention_mask).long()
-            counterfactual_aspect_labels = torch.tensor(counterfactual_aspect_labels).long()
+        ############################################
+        # Own Sampling Code Goes Here.
+        input_ids = batch["input_ids"]
+        attention_mask = batch["attention_mask"]
+        aspect_labels = torch.stack(
+            [
+                batch["ambiance_label_base"], batch["food_label_base"], 
+                batch["noise_label_base"], batch["service_label_base"]
+            ], 
+            dim=-1
+        )
+        probas = torch.tensor(batch["probas_base"])
 
-            # sample an intervention site
-            base_intervention_mask, counterfactual_intervention_mask, \
-                base_intervention_corr, counterfactual_intervention_corr = \
-                self._get_interchange_mask_true_counterfactual(
-                    aspect_labels, counterfactual_aspect_labels
+        counterfactual_input_ids = batch["input_ids_counterfactual"]
+        counterfactual_attention_mask = batch["attention_mask_counterfactual"]
+        counterfactual_probas = torch.tensor(batch["probas_counterfactual"])
+
+        intervention_aspects = batch["intervention_aspect"]
+        intervention_aspect_labels = batch["intervention_aspect_label"]
+        base_intervention_corr = intervention_aspects
+
+        source_input_ids = []
+        source_attention_mask = []
+        source_aspect_labels = []
+        for i in range(0, input_ids.shape[0]):
+            intervention_aspect = self.aspect_encode[int(intervention_aspects[i])]
+            intervention_aspect_label = int(intervention_aspect_labels[i])
+            satisfied_rows = self.query_dataset[
+                self.query_dataset[f"{intervention_aspect}_label"]==intervention_aspect_label
+            ]
+            if len(satisfied_rows) > 0:
+                sampled_source = satisfied_rows.sample().iloc[0]
+                source_input_ids += [sampled_source["input_ids"]]
+                source_attention_mask += [sampled_source["attention_mask"]]
+                source_aspect_label = torch.tensor(
+                    [
+                        sampled_source["ambiance_label"], 
+                        sampled_source["food_label"], 
+                        sampled_source["noise_label"], 
+                        sampled_source["service_label"]
+                    ]
                 )
-            
-            source_input_ids = []
-            source_attention_mask = []
-            source_labels = []
-            source_aspect_labels = []
-            # backfill a source example
-            # (+,+,-,-) (+,'-',-,-) ' ' marks the desired change -> (+,'-',-,-)
-            for i in range(0, counterfactual_aspect_labels.shape[0]):
-                counterfactual_aspect_label = counterfactual_aspect_labels[
-                    i, counterfactual_intervention_corr[i]
-                ]
-                base_aspect_label = aspect_labels[
-                    i, counterfactual_intervention_corr[i]
-                ]
-                satisfied_rows = None
-                if int(counterfactual_intervention_corr[i]) != -1:
-                    aspect_label = {
-                        0:"ambiance_label",1:"food_label",
-                        2:"noise_label",3:"service_label"
-                    }[int(counterfactual_intervention_corr[i])]
-                    satisfied_rows = self.query_dataset[
-                        (self.query_dataset[aspect_label]==int(counterfactual_aspect_label))&
-                        # we don't sample the original sentence!
-                        (self.query_dataset["id"]!=int(counterfactual_ids[i]))
-                    ]
-                
-                if satisfied_rows is not None and len(satisfied_rows) > 0 and counterfactual_masks[i]:
-                    satisfied_rows = satisfied_rows.sample().iloc[0]
-                    source_input_ids += [satisfied_rows["input_ids"]]
-                    source_attention_mask += [satisfied_rows["attention_mask"]]
-                    source_labels += [satisfied_rows["label"]]
-                    source_aspect_labels += [[
-                        satisfied_rows["ambiance_label"], satisfied_rows["food_label"], 
-                        satisfied_rows["noise_label"], satisfied_rows["service_label"]
-                    ]]
-                else:
-                    base_intervention_corr[i] = -1
-                    source_input_ids += [input_ids[i].tolist()]
-                    source_attention_mask += [attention_mask[i].tolist()]
-                    source_labels += [labels[i].tolist()]
-                    source_aspect_labels += [aspect_labels[i].tolist()]  
-                    
-            source_input_ids = torch.tensor(source_input_ids).long()
-            source_attention_mask = torch.tensor(source_attention_mask).long()
-            source_labels = torch.tensor(source_labels).long()
-            source_aspect_labels = torch.tensor(source_aspect_labels).long()
-            
-            source_intervention_corr = base_intervention_corr.clone()
-            source_intervention_mask = base_intervention_mask
-            
-        else:
-            """
-            Random Selection without Using True Counterfactuals.
-            
-            Steps:
-            1. randomly select a source from the same batch.
-            2. randomly decide an intervention site (i.e., concept)
-            3. sample an example from the query set where the example
-               has desired labels for all the concepts.
-            """
-            
-            source_input_ids = input_ids.clone()
-            source_attention_mask = attention_mask.clone()
-            source_labels = labels.clone()
-            source_aspect_labels = aspect_labels.clone()
+                source_aspect_labels += [source_aspect_label]
+            else:
+                # This is unlikely!
+                base_intervention_corr[i] = -1
+                source_input_ids += [input_ids[i]]
+                source_attention_mask += [attention_mask[i]]
+                source_aspect_labels += [aspect_labels[i]]
 
-            _sort_index = [i for i in range(source_input_ids.shape[0])]
-            random.shuffle(_sort_index)
-
-            source_input_ids = source_input_ids[_sort_index]
-            source_attention_mask = source_attention_mask[_sort_index]
-            source_labels = source_labels[_sort_index]
-            source_aspect_labels = source_aspect_labels[_sort_index]
-
-            base_intervention_mask, source_intervention_mask, \
-                base_intervention_corr, source_intervention_corr = self._get_interchange_mask(
-                aspect_labels, source_aspect_labels
-            )
-            counterfactual_aspect_labels = aspect_labels.clone()
-            counterfactual_aspect_labels[base_intervention_mask] = \
-                source_aspect_labels[source_intervention_mask]
-
-            counterfactual_input_ids = []
-            counterfactual_attention_mask = []
-            for i in range(0, counterfactual_aspect_labels.shape[0]):
-                #########
-                # Random Counterfactual lookup!
-                satisfied_rows = self.query_dataset[
-                    (self.query_dataset["ambiance_label"]==int(counterfactual_aspect_labels[i,0]))&
-                    (self.query_dataset["food_label"]==int(counterfactual_aspect_labels[i,1]))&
-                    (self.query_dataset["noise_label"]==int(counterfactual_aspect_labels[i,2]))&
-                    (self.query_dataset["service_label"]==int(counterfactual_aspect_labels[i,3]))
-                ]
-                #########
-                if len(satisfied_rows) > 0:
-                    sampled_counterfactual = satisfied_rows.sample().iloc[0]
-                    counterfactual_input_ids += [sampled_counterfactual["input_ids"]]
-                    counterfactual_attention_mask += [sampled_counterfactual["attention_mask"]]
-                else:
-                    base_intervention_corr[i] = -1
-                    counterfactual_input_ids += [input_ids[i].tolist()]
-                    counterfactual_attention_mask += [attention_mask[i].tolist()]
-            counterfactual_input_ids = torch.tensor(counterfactual_input_ids).long()
-            counterfactual_attention_mask = torch.tensor(counterfactual_attention_mask).long()
-
+        source_input_ids = torch.tensor(source_input_ids).long()
+        source_attention_mask = torch.tensor(source_attention_mask).long()
+        source_aspect_labels = torch.stack(source_aspect_labels, dim=0).long()
+        source_intervention_corr = base_intervention_corr
+        ############################################
+        
+        # The following parts of code are not meant to be changed.
         # send all data to gpus.
-        base_labels = labels.to(self.device)
-        base_aspect_labels = aspect_labels.float().to(self.device)
+        
+        # BASE
         base_input_ids = input_ids.to(self.device)
         base_attention_mask = attention_mask.to(self.device)
+        base_aspect_labels = aspect_labels.float().to(self.device)
+        base_probas = probas.float().to(self.device)
         
-        source_labels = source_labels.to(self.device)
-        source_aspect_labels = source_aspect_labels.float().to(self.device)
+        # SOURCE
         source_input_ids = source_input_ids.to(self.device)
         source_attention_mask = source_attention_mask.to(self.device)
+        source_aspect_labels = source_aspect_labels.float().to(self.device)
         
+        # IIT COORDINATES
         base_intervention_corr = base_intervention_corr.to(self.device)
         source_intervention_corr = source_intervention_corr.to(self.device)
         
+        # COUNTERFACTUAL
         counterfactual_input_ids = counterfactual_input_ids.to(self.device)
         counterfactual_attention_mask = counterfactual_attention_mask.to(self.device)
+        counterfactual_probas = counterfactual_probas.float().to(self.device)
         
-        return base_input_ids, base_attention_mask, base_labels, base_aspect_labels, \
-            source_input_ids, source_attention_mask, source_labels, source_aspect_labels, \
-            base_intervention_mask, source_intervention_mask, base_intervention_corr, source_intervention_corr, \
-            counterfactual_input_ids, counterfactual_attention_mask
-    
-    def _calculate_metrics(
-        self,
-        actual,
-        pred,
-    ):
-        result = {}
-        if self.eval_exclude_neutral:
-            result_to_print = classification_report(
-                actual, pred, digits=5, output_dict=True, labels=[0,1,3,4])
-            print(classification_report(actual, pred, digits=5, labels=[0,1,3,4]))
-        else:
-            result_to_print = classification_report(
-                actual, pred, digits=5, output_dict=True)
-            print(classification_report(actual, pred, digits=5))
-        result["accuracy"] = result_to_print["accuracy"]
-        result["Macro-F1"] = result_to_print["macro avg"]["f1-score"]
-        result["Weighted-Macro-F1"] = result_to_print["weighted avg"]["f1-score"]
-        return result
-        
-    def evaluate(self):
-        accumulated_loss = 0.0
-        accumulated_seq_cls_loss = 0.0
-        accumulated_mul_cls_loss = 0.0
-        accumulated_iit_cls_loss = 0.0
-        
-        accumulated_seq_cls_count = 0
-        accumulated_mul_cls_count = 0
-        accumulated_iit_cls_count = 0
-        
-        # averaged.
-        averaged_loss = 0.0
-        averaged_seq_cls_loss = 0.0
-        averaged_mul_cls_loss = 0.0
-        averaged_iit_cls_loss = 0.0
-        
-        averaged_seq_cls_acc = 1.0/5
-        averaged_mul_cls_acc = 1.0/3
-        averaged_iit_cls_acc = 1.0/5
-        
-        n_sequences_epoch = 0
-        n_effective_iit_sequence_epoch = 0
-        n_effective_aspect_sequence_epoch = 0
-        
-        # labels saved for evaluation metrics.
-        eval_predicted_labels = []
-        eval_actual_labels = []
-        
-        self.high_level_model.model.eval()
-        self.low_level_model.model.eval()
-        with torch.no_grad():
-            eval_dataloader = self.get_eval_dataloader()
-            iter_bar = tqdm(eval_dataloader, desc="-Iter", disable=False)
-            for batch in iter_bar:
-                input_ids = batch["input_ids"]
-                attention_mask = batch["attention_mask"]
-                labels = batch["labels"]
-                original_ids = batch["original_id"]
-                ids = batch["id"]
-                aspect_labels = torch.stack(
-                    [
-                        batch["ambiance_label"], batch["food_label"], 
-                        batch["noise_label"], batch["service_label"]
-                    ], 
-                    dim=-1
-                )
-                
-                base_input_ids, base_attention_mask, \
-                    base_labels, base_aspect_labels, \
-                    source_input_ids, source_attention_mask, \
-                    source_labels, source_aspect_labels, \
-                    base_intervention_mask, source_intervention_mask, base_intervention_corr, source_intervention_corr, \
-                    counterfactual_input_ids, counterfactual_attention_mask = \
-                self.prepare_batch(
-                    *(input_ids, attention_mask, labels, aspect_labels, original_ids, ids, "eval")
-                )
-
-                input_bundle = (
-                    base_labels,
-                    source_labels,
-                    base_aspect_labels,
-                    source_aspect_labels,
-                    base_input_ids,
-                    base_attention_mask,
-                    source_input_ids,
-                    source_attention_mask,
-                    base_intervention_corr,
-                    source_intervention_corr,
-                    base_intervention_mask, 
-                    source_intervention_mask,
-                    counterfactual_input_ids,
-                    counterfactual_attention_mask,
-                )
-        
-                #############################################
-                # high level model.
-                with torch.no_grad():
-                    pred_base_labels, _, counterfactual_labels = self._high_level_model_forward(
-                        *input_bundle
-                    )  
-                # low level model.
-                base_outputs, _, counterfactual_outputs = self._low_level_model_forward(
-                    *input_bundle
-                )
-                #############################################
-                
-                #############################################   
-                # loss: task objective which is classification loss.
-                if "bert" in self.high_level_model_type or "gpt" in self.high_level_model_type or "lstm" in self.high_level_model_type:
-                    seq_cls_loss, seq_cls_count = self._logits_matching_loss(
-                        base_outputs["logits"][0], pred_base_labels["logits"][0]
-                    )
-                else:
-                    seq_cls_loss, seq_cls_count = self._seq_classification_loss(
-                        base_outputs["logits"][0], base_labels.long()
-                    )
-                # loss: multitask objective.
-                mul_cls_loss, mul_cls_count = \
-                        self._mul_classification_loss(*base_outputs["logits"][1:], base_aspect_labels.long())
-                # loss: iit loss.
-                if "bert" in self.high_level_model_type or "gpt" in self.high_level_model_type or "lstm" in self.high_level_model_type:
-                    iit_cls_loss, iit_cls_count = self._logits_matching_loss(
-                        counterfactual_outputs["logits"][0], counterfactual_labels["logits"][0], 
-                        loss_mask=base_intervention_corr!=-1
-                    )
-                else:
-                    if self.high_level_model_type != "majority_voting":
-                        counterfactual_labels = counterfactual_labels.data.max(1)[1] # logits to labels
-                    iit_cls_loss, iit_cls_count = self._seq_classification_loss(
-                        counterfactual_outputs["logits"][0], counterfactual_labels.long(), 
-                        base_intervention_corr!=-1
-                    )
-                # loss: sum all losses together.
-                loss = seq_cls_loss + \
-                    self.alpha * mul_cls_loss + \
-                    self.beta * iit_cls_loss
-                if self.args.n_gpu > 1:
-                    loss = loss.mean()  # mean() to average on multi-gpu.
-                    abstract_cls_loss = None # WARNING: we decide not to train our high level model
-                                             # with the low level model. this is for future research!
-                #############################################
-
-                # get the accumulated stats for stable perf audits.
-                n_sample = base_input_ids.shape[0]
-                accumulated_loss += loss * n_sample
-                accumulated_seq_cls_loss += seq_cls_loss * n_sample
-                accumulated_mul_cls_loss += mul_cls_loss * int((base_aspect_labels.long()!=-1).sum())
-                accumulated_iit_cls_loss += iit_cls_loss * int((base_intervention_corr!=-1).sum())
-                
-                accumulated_seq_cls_count += seq_cls_count
-                accumulated_mul_cls_count += mul_cls_count
-                accumulated_iit_cls_count += iit_cls_count
-                
-                n_sequences_epoch += n_sample
-                n_effective_aspect_sequence_epoch += int((base_aspect_labels.long()!=-1).sum())
-                n_effective_iit_sequence_epoch += int((base_intervention_corr!=-1).sum())
-        
-                # save the label for metrics evaluation.
-                _logits = base_outputs["logits"][0]
-                loss_mask = torch.ones(_logits.shape[0]).bool().to(self.device)
-                eval_predicted_labels.extend(_logits[loss_mask].data.max(1)[1].tolist())
-                eval_actual_labels.extend(base_labels.long().tolist())
-
-        # get the averaged stats for stable perf audits.
-        eval_loss = accumulated_loss / n_sequences_epoch
-        eval_seq_cls_loss = accumulated_seq_cls_loss / n_sequences_epoch
-        eval_mul_cls_loss = accumulated_mul_cls_loss / n_effective_aspect_sequence_epoch
-        if n_effective_iit_sequence_epoch == 0:
-            eval_iit_cls_loss = 0
-        else:
-            eval_iit_cls_loss = accumulated_iit_cls_loss / n_effective_iit_sequence_epoch
-        eval_seq_cls_acc = accumulated_seq_cls_count / n_sequences_epoch
-        eval_mul_cls_acc = accumulated_mul_cls_count / n_effective_aspect_sequence_epoch
-        if n_effective_iit_sequence_epoch == 0:
-            eval_iit_cls_acc = 0
-        else:
-            eval_iit_cls_acc = accumulated_iit_cls_count / n_effective_iit_sequence_epoch
-        
-        # metrics.
-        seq_cls_eval_metrics = self._calculate_metrics(
-            eval_actual_labels, eval_predicted_labels
-        )
-        
-        # log eval results.
-        log_eval = open(os.path.join(self.args.output_dir, 'eval_log.txt'), 'a', buffering=1)
-        print('{},{},{},{},{},{},{},{}'.format(
-                self.epoch+1,
-                eval_loss,
-                eval_seq_cls_loss, 
-                eval_mul_cls_loss,
-                eval_iit_cls_loss, 
-                eval_seq_cls_acc,
-                eval_mul_cls_acc,
-                eval_iit_cls_acc,
-            ),
-            file=log_eval
-        )
-        log_eval.close()
-
-        if "wandb" in self.args.report_to:
-            wandb.log(
-                {
-                    "eval/loss": eval_loss, 
-                    "eval/seq_cls_loss": eval_seq_cls_loss, 
-                    "eval/mul_cls_loss": eval_mul_cls_loss, 
-                    "eval/iit_cls_loss": eval_iit_cls_loss, 
-                    "eval/seq_cls_acc": seq_cls_eval_metrics["accuracy"], # using this!
-                    "eval/mul_cls_acc": eval_mul_cls_acc, 
-                    "eval/iit_cls_acc": eval_iit_cls_acc, 
-                    "eval/accuracy" : seq_cls_eval_metrics["accuracy"],
-                    "eval/Macro-F1" : seq_cls_eval_metrics["Macro-F1"],
-                    "eval/Weighted-Macro-F1" : seq_cls_eval_metrics["Weighted-Macro-F1"],
-                }, 
-            )
-        elif "none" in self.args.report_to:
-            pass
-        
-    def train(self):
-        global_step = 0
-        nb_tr_steps = 0
-        tr_loss = 0
-    
-        self.last_log = time.time()
-        
-        for epoch in trange(int(self.args.num_train_epochs), desc="Epoch"):
-            # prevent end of epoch eval state switch.
-            self.low_level_model.model.train()
-            self.high_level_model.model.eval()
-            train_dataloader = self.get_train_dataloader()
-            iter_bar = tqdm(train_dataloader, desc="-Iter", disable=False)
-            for batch in iter_bar:
-                input_ids = batch["input_ids"]
-                attention_mask = batch["attention_mask"]
-                labels = batch["labels"]
-                original_ids = batch["original_id"]
-                ids = batch["id"]
-                aspect_labels = torch.stack(
-                    [
-                        batch["ambiance_label"], batch["food_label"], 
-                        batch["noise_label"], batch["service_label"], 
-                    ], 
-                    dim=-1
-                )
-                
-                prepared_batch = self.prepare_batch(
-                    *(input_ids, attention_mask, labels, aspect_labels, original_ids, ids, "train")
-                )
-                self._step(*prepared_batch)
-                iter_bar.update()
-                iter_bar.set_postfix(
-                    {
-                        "Last_loss": f"{self.last_loss:.2f}", 
-                        "Avg_cum_loss": f"{self.total_loss_epoch/self.n_iter:.2f}", 
-                    }
-                )
-            iter_bar.close()
-
-            logger.info(f"--- Ending epoch {self.epoch}/{self.args.num_train_epochs-1}")
-            self.end_epoch()
-
-        logger.info("Save very last checkpoint as `pytorch_model.bin`.")
-        self.save_checkpoint()
-        logger.info("Training is finished")
-    
-    def _representation_matching_loss(
-        self,
-        pred_repr,
-        actual_repr,
-        loss_mask=None,
-    ):
-        pass
-    
-    def _logits_matching_loss(
-        self,
-        pred_logits,
-        actual_logits,
-        temperature=2.0,
-        loss_mask=None,
-    ):
-        matching_loss = (
-            self.ce_loss_fct(
-                nn.functional.log_softmax(pred_logits / temperature, dim=-1),
-                nn.functional.softmax(actual_logits / temperature, dim=-1),
-            )
-            * (temperature) ** 2
-        )
-        if self.gemma_cosine != 0:
-            matching_loss += self.cosine_loss_fct(
-                nn.functional.softmax(pred_logits, dim=-1),
-                nn.functional.softmax(actual_logits, dim=-1),
-                torch.ones(pred_logits.shape[0]).to(pred_logits.device)
-            )
-        
-        loss_mask = torch.ones(pred_logits.shape[0]).bool().to(self.device) if loss_mask == None else loss_mask
-        pred_labels = pred_logits.data.max(1)[1].long()[loss_mask]
-        actual_labels = actual_logits.data.max(1)[1].long()[loss_mask]
-        correct_count = pred_labels.eq(actual_labels).sum().cpu().item()  
-        
-        return matching_loss, correct_count
-    
-    def _abstract_classification_loss(
-        self,
-        logits, # this may be logits, but lets see...
-        labels,
-        loss_mask=None,
-        labels_as_logits=False,
-    ):
-        if labels is None:
-            return None, 0
-        
-        if self.high_level_model_type != "majority_voting":
-            if labels_as_logits:
-                labels = labels.data.max(1)[1].long()
-            return self._seq_classification_loss(logits, labels, loss_mask)
-        else:
-            loss_mask = torch.ones(labels.shape[0]).bool().to(self.device) if loss_mask == None else loss_mask
-            pred_cls = logits[loss_mask]
-            correct_count = pred_cls.eq(labels[loss_mask]).sum().cpu().item()   
-            return None, correct_count
-        return None, 0
-
-    def _seq_classification_loss(
-        self,
-        logits,
-        labels,
-        loss_mask=None,
-    ):
-        loss_mask = torch.ones(logits.shape[0]).bool().to(self.device) if loss_mask == None else loss_mask
-        loss_fct = CrossEntropyLoss()
-        
-        loss = loss_fct(logits[loss_mask], labels[loss_mask].view(-1))
-        
-        pred_cls = logits[loss_mask].data.max(1)[1]
-        correct_count = pred_cls.eq(labels[loss_mask]).sum().cpu().item()
-        
-        return loss, correct_count # return the correct count, let the outter loop to determine the rest!
-    
-    def _mul_classification_loss(
-        self,
-        mul_logits_0, mul_logits_1, mul_logits_2, mul_logits_3,
-        mul_labels,
-    ):
-        loss_0, count_0 = self._seq_classification_loss(mul_logits_0, mul_labels[:,0], mul_labels[:,0]!=-1)
-        loss_1, count_1 = self._seq_classification_loss(mul_logits_1, mul_labels[:,1], mul_labels[:,1]!=-1)
-        loss_2, count_2 = self._seq_classification_loss(mul_logits_2, mul_labels[:,2], mul_labels[:,2]!=-1)
-        loss_3, count_3 = self._seq_classification_loss(mul_logits_3, mul_labels[:,3], mul_labels[:,3]!=-1)
-        mul_count = count_0+count_1+count_2+count_3
-        w_0 = count_0*1.0/mul_count if mul_count != 0 else 0.25
-        w_1 = count_1*1.0/mul_count if mul_count != 0 else 0.25
-        w_2 = count_2*1.0/mul_count if mul_count != 0 else 0.25
-        w_3 = count_3*1.0/mul_count if mul_count != 0 else 0.25
-        return w_0*loss_0+w_1*loss_1+w_2*loss_2+w_3*loss_3, mul_count
-    
-    def _record(
-        self, n_sample, n_effective_aspect_sequence, n_effective_iit_sequence,
-        loss, seq_cls_loss, mul_cls_loss, iit_cls_loss,
-        seq_cls_count, mul_cls_count, iit_cls_count,
-        # optional
-        low_label_shifts_count=0,
-        base_source_label_shifts_count=0
-    ):
-        self.total_loss_epoch += loss.item()
-        self.last_loss = loss.item()
-        self.last_seq_cls_loss = seq_cls_loss.mean().item() if self.args.n_gpu > 0 else seq_cls_loss.item()
-        self.last_mul_cls_loss = mul_cls_loss.mean().item() if self.args.n_gpu > 0 else mul_cls_loss.item()
-        self.last_iit_cls_loss = iit_cls_loss.mean().item() if self.args.n_gpu > 0 else iit_cls_loss.item()
-        
-        self.last_seq_cls_acc = seq_cls_count*1.0/n_sample
-        self.last_mul_cls_acc = mul_cls_count*1.0/n_effective_aspect_sequence
-        if n_effective_iit_sequence == 0:
-            self.last_iit_cls_acc = 0
-        else:
-            self.last_iit_cls_acc = iit_cls_count*1.0/n_effective_iit_sequence
-        
-        self.last_effective_intervention = n_effective_iit_sequence*1.0/n_sample
-        self.last_low_label_shifts_count = low_label_shifts_count*1.0/n_sample
-        self.last_base_source_label_shifts_count = base_source_label_shifts_count*1.0/n_sample
-        
-        # get the accumulated stats for stable perf audits.
-        self.accumulated_loss += self.last_loss * n_sample
-        
-        self.accumulated_seq_cls_loss += self.last_seq_cls_loss * n_sample
-        self.accumulated_mul_cls_loss += self.last_mul_cls_loss * n_effective_aspect_sequence
-        self.accumulated_iit_cls_loss += self.last_iit_cls_loss * n_effective_iit_sequence
-        
-        self.accumulated_seq_cls_count += seq_cls_count
-        self.accumulated_mul_cls_count += mul_cls_count
-        self.accumulated_iit_cls_count += iit_cls_count
-     
-        
-        self.n_sequences_epoch += n_sample
-        self.n_effective_aspect_sequence_epoch += n_effective_aspect_sequence
-        self.n_effective_iit_sequence_epoch += n_effective_iit_sequence
-        
-        # get the averaged stats for stable perf audits.
-        self.averaged_loss = self.accumulated_loss / self.n_sequences_epoch
-        self.averaged_seq_cls_loss = self.accumulated_seq_cls_loss / self.n_sequences_epoch
-        self.averaged_mul_cls_loss = self.accumulated_mul_cls_loss / self.n_effective_aspect_sequence_epoch
-        if self.n_effective_iit_sequence_epoch == 0:
-            self.averaged_iit_cls_loss = 0
-        else:
-            self.averaged_iit_cls_loss = self.accumulated_iit_cls_loss / self.n_effective_iit_sequence_epoch
-        self.averaged_seq_cls_acc = self.accumulated_seq_cls_count / self.n_sequences_epoch
-        self.averaged_mul_cls_acc = self.accumulated_mul_cls_count / self.n_effective_aspect_sequence_epoch
-        if self.n_effective_iit_sequence_epoch == 0:
-            self.averaged_iit_cls_acc = 0
-        else:
-            self.averaged_iit_cls_acc = self.accumulated_iit_cls_count / self.n_effective_iit_sequence_epoch
+        return base_input_ids, base_attention_mask, base_aspect_labels, base_probas, \
+            source_input_ids, source_attention_mask, source_aspect_labels, \
+            base_intervention_corr, source_intervention_corr, \
+            counterfactual_input_ids, counterfactual_attention_mask, counterfactual_probas
     
     def _step(
         self,
-        base_input_ids, base_attention_mask, 
-        base_labels, base_aspect_labels,
-        source_input_ids, source_attention_mask, 
-        source_labels, source_aspect_labels,
-        base_intervention_mask, source_intervention_mask, base_intervention_corr, source_intervention_corr,
-        counterfactual_input_ids, counterfactual_attention_mask,
+        base_input_ids, base_attention_mask, base_aspect_labels, base_probas,
+        source_input_ids, source_attention_mask, source_aspect_labels,
+        base_intervention_corr, source_intervention_corr,
+        counterfactual_input_ids, counterfactual_attention_mask, counterfactual_probas,
         skip_update_iter=False
-    ):
-        input_bundle = (
-            base_labels,
-            source_labels,
-            base_aspect_labels,
-            source_aspect_labels,
-            base_input_ids,
-            base_attention_mask,
-            source_input_ids,
-            source_attention_mask,
-            base_intervention_corr,
-            source_intervention_corr,
-            base_intervention_mask, 
-            source_intervention_mask,
-            counterfactual_input_ids,
-            counterfactual_attention_mask,
+    ):         
+        # IIT Forward.
+        base_outputs, source_outputs, counterfactual_outputs = self.low_level_model.forward(
+            base=(base_input_ids, base_attention_mask),
+            source=(source_input_ids, source_attention_mask),
+            base_intervention_corr=base_intervention_corr,
+            source_intervention_corr=source_intervention_corr,
         )
         
-        #############################################
-        # high level model.
-        with torch.no_grad():
-            pred_base_labels, _, counterfactual_labels = self._high_level_model_forward(
-                *input_bundle
-            )  
-        # low level model.
-        base_outputs, _, counterfactual_outputs = self._low_level_model_forward(
-            *input_bundle
-        )
-        #############################################
-        
-        #############################################   
-        # loss: low level model for classification
+        # Three Losses.
         seq_cls_loss, seq_cls_count = self._logits_matching_loss(
-            base_outputs["logits"][0], pred_base_labels["logits"][0]
+            base_outputs["logits"][0], base_probas
         )
-        # loss: low level model for multi-task
         mul_cls_loss, mul_cls_count = \
                 self._mul_classification_loss(*base_outputs["logits"][1:], base_aspect_labels.long())
-        # loss: low level model for mimicing high level model
         iit_cls_loss, iit_cls_count = self._logits_matching_loss(
-            counterfactual_outputs["logits"][0], counterfactual_labels["logits"][0], 
+            counterfactual_outputs["logits"][0], counterfactual_probas, 
             loss_mask=base_intervention_corr!=-1
         )
         loss = self.alpha * seq_cls_loss + \
@@ -926,11 +312,8 @@ class CausalProxyModelTrainer:
             self.gemma * iit_cls_loss
         if self.args.n_gpu > 1:
             loss = loss.mean()  # mean() to average on multi-gpu.
-            abstract_cls_loss = None # WARNING: we decide not to train our high level model
-                                     # with the low level model. this is for future research!
-        #############################################
         
-        # record, and grad descent.
+        # Record.
         self._record(
             base_input_ids.shape[0], 
             int((base_aspect_labels.long()!=-1).sum()), 
@@ -939,265 +322,7 @@ class CausalProxyModelTrainer:
             seq_cls_count, mul_cls_count, iit_cls_count,
             0, 0
         )
-        self.optimize(loss, None, skip_update_iter=skip_update_iter)
-    
-    def _low_level_model_forward(
-        self,
-        base_labels,
-        source_labels,
-        base_aspect_labels,
-        source_aspect_labels,
-        base_input_ids,
-        base_attention_mask,
-        source_input_ids,
-        source_attention_mask,
-        base_intervention_corr,
-        source_intervention_corr,
-        base_intervention_mask, 
-        source_intervention_mask,
-        # we maybe explicity create counterfactual input already!
-        counterfactual_input_ids=None,
-        counterfactual_attention_mask=None,
-    ):
-        # predicted counterfactual labels with the low level model.
-        base_outputs, source_outputs, counterfactual_outputs = self.low_level_model.forward(
-            base=(base_input_ids, base_attention_mask),
-            source=(source_input_ids, source_attention_mask),
-            base_intervention_corr=base_intervention_corr,
-            source_intervention_corr=source_intervention_corr,
-        )
-        return base_outputs, source_outputs, counterfactual_outputs
-    
-    def _high_level_model_forward(
-        self,
-        base_labels,
-        source_labels,
-        base_aspect_labels,
-        source_aspect_labels,
-        base_input_ids,
-        base_attention_mask,
-        source_input_ids,
-        source_attention_mask,
-        base_intervention_corr,
-        source_intervention_corr,
-        base_intervention_mask, 
-        source_intervention_mask,
-        # we maybe explicity create counterfactual input already!
-        counterfactual_input_ids=None,
-        counterfactual_attention_mask=None,
-    ): 
-        if "bert" in self.high_level_model_type or "gpt" in self.high_level_model_type or "lstm" in self.high_level_model_type:
-            # high level model is another bert-based models
-            # much more like model distillation.
-            pred_base_labels, pred_source_labels, _ = self.high_level_model.forward(
-                base=(base_input_ids, base_attention_mask),
-                source=(source_input_ids, source_attention_mask),
-                base_intervention_corr=None,
-                source_intervention_corr=None,
-            )
-            assert counterfactual_input_ids != None
-            assert counterfactual_attention_mask != None
-            # for BERT, we actually explicity feed through counterfactual inputs!
-            counterfactual_labels, _, _ = self.high_level_model.forward(
-                base=(counterfactual_input_ids, counterfactual_attention_mask),
-                source=None,
-                base_intervention_corr=None,
-                source_intervention_corr=None,
-            )
-        else:
-            pred_base_labels, pred_source_labels, counterfactual_labels = self.high_level_model.forward(
-                base_aspect_labels=base_aspect_labels,
-                source_aspect_labels=source_aspect_labels,
-                base_intervention_mask=base_intervention_mask,
-                source_intervention_mask=source_intervention_mask,
-            )
-        return pred_base_labels, pred_source_labels, counterfactual_labels
-    
-    def optimize(self, loss, abstract_cls_loss, skip_update_iter=False):
-        if self.args.gradient_accumulation_steps > 1:
-            loss = loss / self.args.gradient_accumulation_steps
         
-        # backward()
-        if self.args.fp16:
-            assert False
-        else:
-            loss.backward()
-            # update our high level model when applicable.
-            if abstract_cls_loss is not None:
-                abstract_cls_loss.backward()
-                self.high_level_model_optimizer.step()
-                self.high_level_model_optimizer.zero_grad()
-                
-        if not skip_update_iter:
-            self.iter()
-
-            if self.n_iter % self.args.gradient_accumulation_steps == 0:
-                self.lr_this_step = self.optimizer.param_groups[0]['lr']
-                self.optimizer.step()
-                self.lr_scheduler.step()
-                self.optimizer.zero_grad()
-    
-    def iter(self):
-        self.n_iter += 1
-        self.n_total_iter += 1
-        if self.n_total_iter % self.args.save_steps == 0:
-            pass
-            # you can uncomment this line, if you really have checkpoints.
-            # self.save_checkpoint()
-        
-        """
-        Logging is not affected by the flag skip_update_iter.
-        We want to log crossway effects, and losses should be
-        in the same magnitude.
-        """
-        if self.n_total_iter % self.args.logging_steps == 0:
-            self.log_tensorboard()
-            self.last_log = time.time()
-    
-    def log_tensorboard(self):
-        
-        log_train = open(os.path.join(self.args.output_dir, 'train_log.txt'), 'a', buffering=1)
-        print('{},{},{},{},{},{},{},{},{},{}'.format(
-                self.epoch+1, self.n_total_iter, self.n_iter, 
-                self.averaged_loss,
-                self.averaged_seq_cls_loss, 
-                self.averaged_mul_cls_loss,
-                self.averaged_iit_cls_loss, 
-                self.averaged_seq_cls_acc,
-                self.averaged_mul_cls_acc,
-                self.averaged_iit_cls_acc
-            ),
-            file=log_train
-        )
-        log_train.close()
-        
-        if "wandb" in self.args.report_to:
-            wandb.log(
-                {
-                    "train/loss": self.averaged_loss, 
-                    "train/seq_cls_loss": self.averaged_seq_cls_loss, 
-                    "train/mul_cls_loss": self.averaged_mul_cls_loss, 
-                    "train/iit_cls_loss": self.averaged_iit_cls_loss, 
-                    "train/seq_cls_acc": self.averaged_seq_cls_acc, 
-                    "train/mul_cls_acc": self.averaged_mul_cls_acc, 
-                    "train/iit_cls_acc": self.averaged_iit_cls_acc, 
-                    
-                    "train/lr": float(self.lr_this_step),
-                    "train/speed": time.time()-self.last_log,
-                    
-                    "train/effective_intervention": self.last_effective_intervention,
-                    "train/low_iit_label_shifts": self.last_low_label_shifts_count,
-                    "train/base_source_label_shifts": self.last_base_source_label_shifts_count,
-                }, 
-                step=self.n_total_iter
-            )
-        elif "none" in self.args.report_to:
-            pass
-    
-    def end_epoch(self):
-        logger.info(f"{self.n_sequences_epoch} sequences have been trained during this epoch.")
-        
-        if self.args.do_eval:
-            self.evaluate()
-
-        self.epoch += 1
-        self.n_sequences_epoch = 0
-        self.n_iter = 0
-        self.total_loss_epoch = 0
-        self.n_effective_aspect_sequence_epoch = 0
-        self.n_effective_iit_sequence_epoch = 0
-        
-        self.total_loss_epoch = 0
-        self.accumulated_loss = 0.0
-        self.accumulated_seq_cls_loss = 0.0
-        self.accumulated_mul_cls_loss = 0.0
-        self.accumulated_iit_cls_loss = 0.0
-        
-        self.accumulated_seq_cls_count = 0
-        self.accumulated_mul_cls_count = 0
-        self.accumulated_iit_cls_count = 0
-        self.accumulated_abstract_cls_count = 0
-    
-    def save_checkpoint(self):
-        try:
-            self.low_level_model.model.save_pretrained(
-                self.args.output_dir,
-            )
-        except:
-            self.low_level_model.model.module.save_pretrained(
-                self.args.output_dir,
-            )
-            
-    def _remove_unused_columns(self, dataset, description: Optional[str] = None):
-        if not self.args.remove_unused_columns:
-            return dataset
-
-        self._signature_columns = [
-            "label", "label_ids", "input_ids", "attention_mask", "original_id", "id",
-            'ambiance_label', 'food_label', 'noise_label', 'service_label'
-        ]
-
-        ignored_columns = list(set(dataset.column_names) - set(self._signature_columns))
-    
-        if len(ignored_columns) > 0:
-            dset_description = "" if description is None else f"in the {description} set "
-            logger.info(
-                f"The following columns {', '.join(ignored_columns)} in {dset_description} are ignored."
-            )
-
-        columns = [k for k in self._signature_columns if k in dataset.column_names]
-    
-        if version.parse(datasets.__version__) < version.parse("1.4.0"):
-            dataset.set_format(
-                type=dataset.format["type"], columns=columns, format_kwargs=dataset.format["format_kwargs"]
-            )
-            return dataset
-        else:
-            return dataset.remove_columns(ignored_columns)
-    
-    def get_train_dataloader(self):
-        """
-        Returns the training [`~torch.utils.data.DataLoader`].
-        Will use no sampler if `train_dataset` does not implement `__len__`, a random sampler (adapted to distributed
-        training if necessary) otherwise.
-        Subclass and override this method if you want to inject some custom behavior.
-        """
-        if self.train_dataset is None:
-            raise ValueError("Trainer: training requires a train_dataset.")
-
-        train_dataset = self.train_dataset
-        train_dataset = self._remove_unused_columns(train_dataset, description="training")
-        
-        return DataLoader(
-            train_dataset,
-            batch_size=self.train_batch_size,
-            sampler=RandomSampler(train_dataset),
-            collate_fn=self.data_collator,
-            drop_last=self.args.dataloader_drop_last,
-            num_workers=self.args.dataloader_num_workers,
-            pin_memory=self.args.dataloader_pin_memory,
-        )
-
-    def get_eval_dataloader(self):
-        """
-        Returns the training [`~torch.utils.data.DataLoader`].
-        Will use no sampler if `train_dataset` does not implement `__len__`, a random sampler (adapted to distributed
-        training if necessary) otherwise.
-        Subclass and override this method if you want to inject some custom behavior.
-        """
-        if self.eval_dataset is None:
-            raise ValueError("Trainer: eval requires a eval_dataset.")
-
-        eval_dataset = self.eval_dataset
-        eval_dataset = self._remove_unused_columns(eval_dataset, description="evaluation")
-        
-        return DataLoader(
-            eval_dataset,
-            sampler=SequentialSampler(eval_dataset),
-            batch_size=self.eval_batch_size,
-            collate_fn=self.data_collator,
-            drop_last=self.args.dataloader_drop_last,
-            num_workers=self.args.dataloader_num_workers,
-            pin_memory=self.args.dataloader_pin_memory,
-        )
+        # Backprop.
+        self.optimize(loss, skip_update_iter=skip_update_iter)
     
