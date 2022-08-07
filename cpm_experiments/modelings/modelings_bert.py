@@ -74,7 +74,7 @@ class CausalProxyModelForBERT(Explainer, CausalExplainer):
         device, batch_size, 
         intervention_h_dim=1,
         min_iit_pair_examples=1,
-        match_non_int_type=False,
+        match_non_int_type=True,
         cache_dir="../../huggingface_cache",
     ):
         self.batch_size = batch_size
@@ -126,7 +126,7 @@ class CausalProxyModelForBERT(Explainer, CausalExplainer):
         probas = []
         for i in range(ceil(len(dataset) / self.batch_size)):
             x_batch = {k: v[i * self.batch_size:(i + 1) * self.batch_size].to(self.device) for k, v in x.items()}
-            probas.append(self.cpm_model.model(**x_batch).logits[0].cpu().detach())
+            probas.append(torch.nn.functional.softmax(self.cpm_model.model(**x_batch).logits[0].cpu(), dim=-1).detach())
 
         probas = torch.concat(probas)
         probas = np.round(probas.numpy(), decimals=16)
@@ -221,8 +221,8 @@ class CausalProxyModelForBERT(Explainer, CausalExplainer):
     
     def estimate_icace(self, pairs, df):
         CPM_iTEs = []
-        self.blackbox_model.eval()
-        self.cpm_model.model.eval()
+        # self.blackbox_model.eval()
+        # self.cpm_model.model.eval()
         base_x, source_x, intervention_corr, iit_pairs_dataset = self.preprocess(
             pairs, df
         )

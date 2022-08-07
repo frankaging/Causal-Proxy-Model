@@ -403,7 +403,7 @@ class Trainer:
             'noise_label_base', 'service_label_base',
             'ambiance_label_counterfactual', 'food_label_counterfactual', 
             'noise_label_counterfactual', 'service_label_counterfactual',
-            'probas_base', 'probas_counterfactual',
+            'logits_base', 'logits_counterfactual', 'logits',
         ]
 
         ignored_columns = list(set(dataset.column_names) - set(self._signature_columns))

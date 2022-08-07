@@ -32,6 +32,12 @@ class CausalProxyModelTrainer(Trainer):
             2: "noise",
             3: "service",
         }
+        self.aspect_decode = {
+            "ambiance": 0,
+            "food": 1,
+            "noise": 2,
+            "service": 3,
+        }
         # device
         self.device = device
         self.high_level_model.model.to(self.device)
@@ -92,11 +98,12 @@ class CausalProxyModelTrainer(Trainer):
             self.lr_this_step = self.optimizer.param_groups[0]['lr']
         
         # for the query dataset, we also do the same
+        self.high_level_model.model.eval()
         updated_query_dataset = query_dataset.data.to_pandas()
         any_batch_size = 1024
         with torch.no_grad():
             logger.info("***** Pre-calculating forward results on query set to save training time *****")
-            probas_query = []
+            logits_query = []
             query_dataloader = self.get_any_dataloader(
                 self.query_dataset, any_batch_size=any_batch_size
             )
@@ -104,21 +111,21 @@ class CausalProxyModelTrainer(Trainer):
             for batch in iter_bar:
                 input_ids = batch["input_ids"].to(self.device)
                 attention_mask = batch["attention_mask"].to(self.device)
-                probas_query.append(torch.nn.functional.softmax(self.high_level_model.model(
+                logits_query.append(self.high_level_model.model(
                     input_ids = input_ids,
                     attention_mask = attention_mask
-                ).logits[0].cpu(), dim=-1).detach())
-            probas_query = torch.concat(probas_query)
-            probas_query = np.round(probas_query.numpy(), decimals=16)
-            updated_query_dataset["probas"] = list(probas_query)
+                ).logits[0].cpu().detach())
+            logits_query = torch.concat(logits_query)
+            logits_query = np.round(logits_query.numpy(), decimals=16)
+            updated_query_dataset["logits"] = list(logits_query)
         self.query_dataset = updated_query_dataset
         
         updated_train_dataset = self.train_dataset.to_pandas()
         # Make prediction with high level model first.
         with torch.no_grad():
             logger.info("***** Pre-calculating forward results on training set to save training time *****")
-            self.high_level_model.model.eval()
-            probas_base = []
+            logits_base = []
+            logits_counterfactual = []
             train_dataloader = self.get_any_dataloader(
                 self.train_dataset, any_batch_size=any_batch_size
             )
@@ -126,29 +133,26 @@ class CausalProxyModelTrainer(Trainer):
             for batch in iter_bar:
                 input_ids = batch["input_ids"].to(self.device)
                 attention_mask = batch["attention_mask"].to(self.device)
-                probas_base.append(torch.nn.functional.softmax(self.high_level_model.model(
+                logits_base.append(self.high_level_model.model(
                     input_ids = input_ids,
                     attention_mask = attention_mask
-                ).logits[0].cpu(), dim=-1).detach())
-            probas_base = torch.concat(probas_base)
-            probas_base = np.round(probas_base.numpy(), decimals=16)
-            updated_train_dataset["probas_base"] = list(probas_base)
+                ).logits[0].cpu().detach())
             
-            probas_counterfactual = []
-            train_dataloader = self.get_any_dataloader(
-                self.train_dataset, any_batch_size=any_batch_size
-            )
-            iter_bar = tqdm(train_dataloader, desc="-Iter", disable=False)
-            for batch in iter_bar:
                 input_ids_counterfactual = batch["input_ids_counterfactual"].to(self.device)
                 attention_mask_counterfactual = batch["attention_mask_counterfactual"].to(self.device)
-                probas_counterfactual.append(torch.nn.functional.softmax(self.high_level_model.model(
+                logits_counterfactual.append(self.high_level_model.model(
                     input_ids = input_ids_counterfactual,
                     attention_mask = attention_mask_counterfactual
-                ).logits[0].cpu(), dim=-1).detach())
-            probas_counterfactual = torch.concat(probas_counterfactual)
-            probas_counterfactual = np.round(probas_counterfactual.numpy(), decimals=16)
-            updated_train_dataset["probas_counterfactual"] = list(probas_counterfactual)
+                ).logits[0].cpu().detach())
+                
+            logits_base = torch.concat(logits_base)
+            logits_base = np.round(logits_base.numpy(), decimals=16)
+            updated_train_dataset["logits_base"] = list(logits_base)
+            
+            logits_counterfactual = torch.concat(logits_counterfactual)
+            logits_counterfactual = np.round(logits_counterfactual.numpy(), decimals=16)
+            updated_train_dataset["logits_counterfactual"] = list(logits_counterfactual)
+            
         self.train_dataset = Dataset.from_pandas(updated_train_dataset)
         
         # lets do some garbage collection.
@@ -208,11 +212,11 @@ class CausalProxyModelTrainer(Trainer):
             ], 
             dim=-1
         )
-        probas = torch.tensor(batch["probas_base"])
+        logits = torch.tensor(batch["logits_base"])
 
         counterfactual_input_ids = batch["input_ids_counterfactual"]
         counterfactual_attention_mask = batch["attention_mask_counterfactual"]
-        counterfactual_probas = torch.tensor(batch["probas_counterfactual"])
+        counterfactual_logits = torch.tensor(batch["logits_counterfactual"])
 
         intervention_aspects = batch["intervention_aspect"]
         intervention_aspect_labels = batch["intervention_aspect_label"]
@@ -227,6 +231,15 @@ class CausalProxyModelTrainer(Trainer):
             satisfied_rows = self.query_dataset[
                 self.query_dataset[f"{intervention_aspect}_label"]==intervention_aspect_label
             ]
+            # for other controlled conditions, we also need to filter.
+            non_intervention_aspect = {"ambiance", "food", "noise", "service"} - {intervention_aspect}
+            for control_aspect in non_intervention_aspect:
+                control_aspect_int = self.aspect_decode[control_aspect]
+                satisfied_rows = satisfied_rows[
+                    (satisfied_rows[f"{control_aspect}_label"]==\
+                     int(aspect_labels[i][control_aspect_int]))
+                ]
+
             if len(satisfied_rows) > 0:
                 sampled_source = satisfied_rows.sample().iloc[0]
                 source_input_ids += [sampled_source["input_ids"]]
@@ -260,7 +273,7 @@ class CausalProxyModelTrainer(Trainer):
         base_input_ids = input_ids.to(self.device)
         base_attention_mask = attention_mask.to(self.device)
         base_aspect_labels = aspect_labels.float().to(self.device)
-        base_probas = probas.float().to(self.device)
+        base_logits = logits.float().to(self.device)
         
         # SOURCE
         source_input_ids = source_input_ids.to(self.device)
@@ -274,19 +287,19 @@ class CausalProxyModelTrainer(Trainer):
         # COUNTERFACTUAL
         counterfactual_input_ids = counterfactual_input_ids.to(self.device)
         counterfactual_attention_mask = counterfactual_attention_mask.to(self.device)
-        counterfactual_probas = counterfactual_probas.float().to(self.device)
+        counterfactual_logits = counterfactual_logits.float().to(self.device)
         
-        return base_input_ids, base_attention_mask, base_aspect_labels, base_probas, \
+        return base_input_ids, base_attention_mask, base_aspect_labels, base_logits, \
             source_input_ids, source_attention_mask, source_aspect_labels, \
             base_intervention_corr, source_intervention_corr, \
-            counterfactual_input_ids, counterfactual_attention_mask, counterfactual_probas
+            counterfactual_input_ids, counterfactual_attention_mask, counterfactual_logits
     
     def _step(
         self,
-        base_input_ids, base_attention_mask, base_aspect_labels, base_probas,
+        base_input_ids, base_attention_mask, base_aspect_labels, base_logits,
         source_input_ids, source_attention_mask, source_aspect_labels,
         base_intervention_corr, source_intervention_corr,
-        counterfactual_input_ids, counterfactual_attention_mask, counterfactual_probas,
+        counterfactual_input_ids, counterfactual_attention_mask, counterfactual_logits,
         skip_update_iter=False
     ):         
         # IIT Forward.
@@ -299,12 +312,12 @@ class CausalProxyModelTrainer(Trainer):
         
         # Three Losses.
         seq_cls_loss, seq_cls_count = self._logits_matching_loss(
-            base_outputs["logits"][0], base_probas
+            base_outputs["logits"][0], base_logits
         )
         mul_cls_loss, mul_cls_count = \
                 self._mul_classification_loss(*base_outputs["logits"][1:], base_aspect_labels.long())
         iit_cls_loss, iit_cls_count = self._logits_matching_loss(
-            counterfactual_outputs["logits"][0], counterfactual_probas, 
+            counterfactual_outputs["logits"][0], counterfactual_logits, 
             loss_mask=base_intervention_corr!=-1
         )
         loss = self.alpha * seq_cls_loss + \
