@@ -602,6 +602,11 @@ class RobertaEncoder(nn.Module):
         self.layer = nn.ModuleList([RobertaLayer(config) for _ in range(config.num_hidden_layers)])
         self.gradient_checkpointing = False
         self.intervention_h_dim = config.intervention_h_dim
+        try:
+            self.interchange_hidden_layer = config.interchange_hidden_layer
+        except:
+            self.interchange_hidden_layer = 12
+        self.num_of_cls_token = int((config.intervention_h_dim*4)/config.hidden_size)
         
     def forward(
         self,
@@ -676,20 +681,27 @@ class RobertaEncoder(nn.Module):
                 if self.config.add_cross_attention:
                     all_cross_attentions = all_cross_attentions + (layer_outputs[2],)
                         
-            # INT_POINT: only the last layer!
-            if base_intervention_corr is not None and source_hidden_states is not None and i == self.config.num_hidden_layers-1:
+            if base_intervention_corr is not None and source_hidden_states is not None and i == self.interchange_hidden_layer-1:
                 for b in range(0, hidden_states.shape[0]):
                     if base_intervention_corr[b] != -1:
                         start_idx = base_intervention_corr[b]*self.intervention_h_dim
                         end_idx = (base_intervention_corr[b]+1)*self.intervention_h_dim
+                        """
+                        WARNING:
+
+                        We simply assume the start_idx and end_idx are both locate in same
+                        CLS token. It cannot span across multiple tokens.
+                        """
+                        cls_token_idx = int(start_idx/self.config.hidden_size)
                         # we support where the pass in source_hidden_states
                         # is a partial one only for the interchanging aspect.
-                        if not isinstance(source_hidden_states, tuple) and hidden_states.shape[-1] != source_hidden_states.shape[-1]:
-                            hidden_states[b][0][start_idx:end_idx] = source_hidden_states[b]
+                        if not isinstance(source_hidden_states, tuple) and \
+                            hidden_states.shape[-1] != source_hidden_states.shape[-1]:
+                            hidden_states[b][cls_token_idx][start_idx:end_idx] = source_hidden_states[b]
                             # hidden_states[b][0][start_idx:end_idx] += source_hidden_states[b]
                         else:
-                            hidden_states[b][0][start_idx:end_idx] = \
-                                source_hidden_states[i+1][b][0][start_idx:end_idx]   
+                            hidden_states[b][cls_token_idx][start_idx:end_idx] = \
+                                source_hidden_states[i+1][b][cls_token_idx][start_idx:end_idx]    
                         
         if output_hidden_states:
             all_hidden_states = all_hidden_states + (hidden_states,)
@@ -713,22 +725,6 @@ class RobertaEncoder(nn.Module):
             attentions=all_self_attentions,
             cross_attentions=all_cross_attentions,
         )
-
-
-# Copied from transformers.models.bert.modeling_bert.BertPooler
-class RobertaPooler(nn.Module):
-    def __init__(self, config):
-        super().__init__()
-        self.dense = nn.Linear(config.hidden_size, config.hidden_size)
-        self.activation = nn.Tanh()
-
-    def forward(self, hidden_states: torch.Tensor) -> torch.Tensor:
-        # We "pool" the model by simply taking the hidden state corresponding
-        # to the first token.
-        first_token_tensor = hidden_states[:, 0]
-        pooled_output = self.dense(first_token_tensor)
-        pooled_output = self.activation(pooled_output)
-        return pooled_output
 
 
 class RobertaPreTrainedModel(PreTrainedModel):
@@ -977,6 +973,12 @@ class IITRobertaForSequenceClassification(RobertaPreTrainedModel):
             config, num_aspect_labels
         )
         self.intervention_h_dim = config.intervention_h_dim
+        try:
+            self.interchange_hidden_layer = config.interchange_hidden_layer
+        except:
+            self.interchange_hidden_layer = 12
+        
+        self.num_of_cls_token = max(1, int((config.intervention_h_dim*4)/config.hidden_size))
         # Initialize weights and apply final processing
         self.post_init()
 
@@ -1011,7 +1013,7 @@ class IITRobertaForSequenceClassification(RobertaPreTrainedModel):
         if cls_hidden_reprs is not None:
             # we also need to all the pooler once if configured.
             sequence_output = cls_hidden_reprs
-            mul_pooled_output = sequence_output[:,0,:]
+            mul_pooled_output = sequence_output[:, 0:self.num_of_cls_token]
         else:
             outputs = self.roberta(
                 input_ids,
@@ -1027,14 +1029,16 @@ class IITRobertaForSequenceClassification(RobertaPreTrainedModel):
                 all_layers=all_layers,
                 # counterfactual arguments
                 output_attentions=output_attentions,
-                output_hidden_states=output_hidden_states,
+                # don't give a fuck, just get all of them. it is not optimal!
+                output_hidden_states=True,
                 return_dict=return_dict,
             )
             sequence_output = outputs[0]
-            mul_pooled_output = sequence_output[:,0,:]
+            mul_pooled_output = outputs.hidden_states[self.interchange_hidden_layer][:, 0:self.num_of_cls_token]
         
         logits = self.classifier(sequence_output)
-
+        
+        mul_pooled_output = mul_pooled_output.view(mul_pooled_output.shape[0], -1)
         mul_logits_0 = self.multitask_classifier(mul_pooled_output[:,:self.intervention_h_dim])
         mul_logits_1 = self.multitask_classifier(mul_pooled_output[:,self.intervention_h_dim:self.intervention_h_dim*2])
         mul_logits_2 = self.multitask_classifier(mul_pooled_output[:,self.intervention_h_dim*2:self.intervention_h_dim*3])
@@ -1094,21 +1098,42 @@ class MultiTaskClassificationHead(nn.Module):
         x = self.dropout(x)
         x = self.out_proj(x)
         return x
+
+# Copied from transformers.models.bert.modeling_bert.BertPooler
+class RobertaPooler(nn.Module):
+    def __init__(self, config):
+        super().__init__()
+        hidden_size = max(config.hidden_size, config.intervention_h_dim*4)
+        self.dense = nn.Linear(hidden_size, hidden_size)
+        self.activation = nn.Tanh()
+
+    def forward(self, hidden_states: torch.Tensor) -> torch.Tensor:
+        # We "pool" the model by simply taking the hidden state corresponding
+        # to the first token.
+        first_token_tensor = hidden_states[:, 0:self.num_of_cls_token]
+        first_token_tensor = x.view(first_token_tensor.shape[0], -1)
+        pooled_output = self.dense(first_token_tensor)
+        pooled_output = self.activation(pooled_output)
+        return pooled_output
     
 class RobertaClassificationHead(nn.Module):
     """Head for sentence-level classification tasks."""
 
     def __init__(self, config):
         super().__init__()
-        self.dense = nn.Linear(config.hidden_size, config.hidden_size)
+        hidden_size = max(config.hidden_size, config.intervention_h_dim*4)
+        self.dense = nn.Linear(hidden_size, hidden_size)
         classifier_dropout = (
             config.classifier_dropout if config.classifier_dropout is not None else config.hidden_dropout_prob
         )
         self.dropout = nn.Dropout(classifier_dropout)
-        self.out_proj = nn.Linear(config.hidden_size, config.num_labels)
-
+        self.out_proj = nn.Linear(hidden_size, config.num_labels)
+        self.num_of_cls_token = max(1, int((config.intervention_h_dim*4)/config.hidden_size))
+        
     def forward(self, features, **kwargs):
-        x = features[:, 0, :]  # take <s> token (equiv. to [CLS])
+        x = features[:, 0:self.num_of_cls_token]  # take <s> token (equiv. to [CLS])
+        x = x.view(x.shape[0], -1)
+        
         x = self.dropout(x)
         x = self.dense(x)
         x = torch.tanh(x)

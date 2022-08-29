@@ -61,10 +61,6 @@ class Trainer:
         self.last_mul_cls_acc = 1.0/3
         self.last_iit_cls_acc = 1.0/5
         
-        self.last_effective_intervention = 0.0
-        self.last_low_label_shifts_count = 0.0
-        self.last_base_source_label_shifts_count = 0.0
-        
         # accumulated.
         self.accumulated_loss = 0.0
         self.accumulated_seq_cls_loss = 0.0
@@ -75,7 +71,6 @@ class Trainer:
         self.accumulated_mul_cls_count = 0
         self.accumulated_iit_cls_count = 0
 
-        
         # averaged.
         self.averaged_loss = 0.0
         self.averaged_seq_cls_loss = 0.0
@@ -90,6 +85,10 @@ class Trainer:
         self.cosine_loss_fct = CosineEmbeddingLoss(reduction="mean")
         self.ce_loss_fct = nn.CrossEntropyLoss()
         
+        # evaluation metrics
+        self.best_cosine_metric = 99
+        self.current_patience = 0
+        
         if "wandb" in self.args.report_to:
             import wandb
             run = wandb.init(
@@ -103,7 +102,7 @@ class Trainer:
         log_train = open(os.path.join(self.args.output_dir, 'train_log.txt'), 'w', buffering=1)
         log_eval = open(os.path.join(self.args.output_dir, 'eval_log.txt'), 'w', buffering=1)
         print('epoch,global_steps,step,loss,seq_cls_loss,mul_cls_loss,iit_cls_loss,seq_cls_acc,mul_cls_acc,iit_cls_acc', file=log_train)
-        print('epoch,loss,seq_cls_loss,mul_cls_loss,iit_cls_loss,seq_cls_acc,mul_cls_acc,iit_cls_acc', file=log_eval)
+        print('epoch,global_steps,cosine_metric', file=log_eval)
         log_train.close()
         log_eval.close()
         
@@ -193,10 +192,6 @@ class Trainer:
         else:
             self.last_iit_cls_acc = iit_cls_count*1.0/n_effective_iit_sequence
         
-        self.last_effective_intervention = n_effective_iit_sequence*1.0/n_sample
-        self.last_low_label_shifts_count = low_label_shifts_count*1.0/n_sample
-        self.last_base_source_label_shifts_count = base_source_label_shifts_count*1.0/n_sample
-        
         # get the accumulated stats for stable perf audits.
         self.accumulated_loss += self.last_loss * n_sample
         
@@ -258,10 +253,6 @@ class Trainer:
                     
                     "train/lr": float(self.lr_this_step),
                     "train/speed": time.time()-self.last_log,
-                    
-                    "train/effective_intervention": self.last_effective_intervention,
-                    "train/low_iit_label_shifts": self.last_low_label_shifts_count,
-                    "train/base_source_label_shifts": self.last_base_source_label_shifts_count,
                 }, 
                 step=self.n_total_iter
             )
@@ -285,44 +276,27 @@ class Trainer:
     def iter(self):
         self.n_iter += 1
         self.n_total_iter += 1
-        if self.n_total_iter % self.args.save_steps == 0:
-            pass
-            # you can uncomment this line, if you really have checkpoints.
-            # self.save_checkpoint()
         
-        """
-        Logging is not affected by the flag skip_update_iter.
-        We want to log crossway effects, and losses should be
-        in the same magnitude.
-        """
         if self.n_total_iter % self.args.logging_steps == 0:
             self.log_tensorboard()
             self.last_log = time.time()
-            
-    def optimize(self, loss, skip_update_iter=False):
+    
+    def optimize(self, loss):
+
         if self.args.gradient_accumulation_steps > 1:
             loss = loss / self.args.gradient_accumulation_steps
+        loss.backward()   
+        self.iter()
         
-        # backward()
-        if self.args.fp16:
-            assert False
-        else:
-            loss.backward()
-                
-        if not skip_update_iter:
-            self.iter()
-
-            if self.n_iter % self.args.gradient_accumulation_steps == 0:
-                self.lr_this_step = self.optimizer.param_groups[0]['lr']
-                self.optimizer.step()
-                self.lr_scheduler.step()
-                self.optimizer.zero_grad()
-                
+        if (self.n_iter % self.args.gradient_accumulation_steps == 0) or \
+            (self.n_iter*self.train_batch_size >= len(self.train_dataset)):
+            self.lr_this_step = self.optimizer.param_groups[0]['lr']
+            self.optimizer.step()
+            self.lr_scheduler.step()
+            self.optimizer.zero_grad()
+        
     def end_epoch(self):
         logger.info(f"{self.n_sequences_epoch} sequences have been trained during this epoch.")
-        
-        if self.args.do_eval:
-            self.evaluate()
 
         self.epoch += 1
         self.n_sequences_epoch = 0
@@ -343,19 +317,26 @@ class Trainer:
         self.accumulated_abstract_cls_count = 0
         
     def evaluate(self):
-        pass
+        return False
         # TODO: this function needs to be rebuilt.
         
     def train(self):
         
         self.last_log = time.time()
-
+        is_stopped_early = False
+        
         for epoch in trange(int(self.args.num_train_epochs), desc="Epoch"):
             # prevent end of epoch eval state switch.
             self.low_level_model.model.train()
             train_dataloader = self.get_train_dataloader()
             iter_bar = tqdm(train_dataloader, desc="-Iter", disable=False)
             for batch in iter_bar:
+                # we first evaluate current model, and see if we need early stop.
+                if self.n_total_iter != 0 and \
+                    self.n_total_iter % self.args.save_steps == 0:
+                    if self.evaluate():
+                        is_stopped_early = True
+                        break
                 prepared_batch = self.prepare_batch(batch)
                 self._step(*prepared_batch)
                 iter_bar.update()
@@ -365,15 +346,17 @@ class Trainer:
                         "Avg_cum_loss": f"{self.total_loss_epoch/self.n_iter:.2f}" if self.n_iter != 0 else 0.0, 
                     }
                 )
+            if is_stopped_early:
+                break
             iter_bar.close()
 
             logger.info(f"--- Ending epoch {self.epoch}/{self.args.num_train_epochs-1}")
             self.end_epoch()
-
-        logger.info("Save very last checkpoint as `pytorch_model.bin`.")
-        self.save_checkpoint()
-        logger.info("Training is finished")
         
+        if is_stopped_early == True:
+            logger.info("Training is early stopped as we found the best performing model")
+        else:
+            logger.info("Training is finished")
 
     def save_checkpoint(self):
         try:
@@ -403,7 +386,10 @@ class Trainer:
             'noise_label_base', 'service_label_base',
             'ambiance_label_counterfactual', 'food_label_counterfactual', 
             'noise_label_counterfactual', 'service_label_counterfactual',
-            'logits_base', 'logits_counterfactual', 'logits',
+            'logits_base', 'logits_counterfactual', 'logits', 
+            'prediction_base', 'icace',
+            'input_ids_approximate', 'token_type_ids_approximate', 
+            'attention_mask_approximate', 'is_counterfactual_pairs'
         ]
 
         ignored_columns = list(set(dataset.column_names) - set(self._signature_columns))

@@ -34,7 +34,7 @@ from models.modelings_lstm import *
 
 from eval_pipeline.models.abstract_model import Model 
 from eval_pipeline.explainers.abstract_explainer import Explainer
-from eval_pipeline.utils.data_utils import preprocess_hf_dataset
+from eval_pipeline.utils.data_utils import *
 from eval_pipeline.customized_models.bert import BertForNonlinearSequenceClassification
 from eval_pipeline.customized_models.roberta import RobertaForNonlinearSequenceClassification
 from eval_pipeline.customized_models.gpt2 import GPT2ForNonlinearSequenceClassification
@@ -137,34 +137,82 @@ class CausalExplainer(object):
 def cebab_pipeline(
     model, explainer, 
     train_dataset, dev_dataset, 
-    dataset_type='5-way', 
-    shorten_model_name=False,
-    correction_epsilon=0.001,
+    seed, k, dataset_type='5-way', 
+    shorten_model_name=False, 
+    train_setting='exclusive', approximate=False
 ):
+    # TODO: add inclusive
+    ## k training pairs (sample or get them from a pre-loaded sampled file?)
+    ### How? k pairs == 2*k samples, with a maximum of k u's
+    ## n-k training singles
+
+    if train_setting in ['inclusive', 'approximate']:
+        # NOTE: this can be moved to an outer loop for speed optimization.
+        # NOTE: this should be done before the runs and just saved in some files
+        # TODO: approx true
+        train_dataset, train_pairs_dataset = get_train_singles_and_pairs(
+            train_dataset[0], train_dataset[1], 
+            seed, k, dataset_type=dataset_type, 
+            approximate=approximate
+        )
+    elif train_setting == 'exclusive':
+        pass
+ 
+    # NOTE: we will only work with models that are fitted
+    # fit model
+    model.fit(train_dataset)
+    
     # get predictions on train and dev
-    train_predictions, _ = model.predict_proba(
-        train_dataset
-    )
-    dev_predictions, dev_report = model.predict_proba(
-        dev_dataset
-    )
+    train_predictions, _ = model.predict_proba(train_dataset)
+    dev_predictions, dev_report = model.predict_proba(dev_dataset)
+
+    if train_setting in ['inclusive', 'approximate']:
+        # TODO: add predictions to dataset
+        # TODO: get the model predictions in a pair format for inclusive explainers
+        predictions = pd.DataFrame(data=zip(train_dataset['id'].to_numpy(), train_predictions), columns=['id', 'prediction'])
+
+        train_dataset = train_dataset.merge(predictions, on='id')
+
+        predictions_base = predictions.rename(lambda x: x+'_base', axis=1) 
+        predictions_counterfactual = predictions.rename(lambda x: x+'_counterfactual', axis=1) 
+
+        train_pairs_dataset = train_pairs_dataset.merge(predictions_base, on='id_base')
+        train_pairs_dataset = train_pairs_dataset.merge(predictions_counterfactual, on='id_counterfactual')
 
     # append predictions to datasets
-    train_dataset['prediction'] = list(train_predictions)
+    # train_dataset['prediction'] = list(train_predictions)
     dev_dataset['prediction'] = list(dev_predictions)
 
-    # fit explainer
-    explainer.fit(
-        train_dataset, train_predictions, 
-        model, dev_dataset
-    )
-
     # get intervention pairs
-    
+    # TODO: approx false
     pairs_dataset = get_intervention_pairs(
         dev_dataset, dataset_type=dataset_type
     )  # TODO why is the index not unique here?
-        
+
+    # fit explainer
+    # TODO: add inclusive
+    if train_setting in ['inclusive', 'approximate']:
+        explainer.fit(train_pairs_dataset, train_dataset, model, dev_dataset=pairs_dataset)
+    elif train_setting == 'exclusive':
+        explainer.fit(train_dataset, train_predictions, model, dev_dataset=dev_dataset)
+
+    # mitigate possible data leakage
+    allowed_columns = [
+        'description_base',
+        'review_majority_base',
+        'food_aspect_majority_base',
+        'service_aspect_majority_base',
+        'noise_aspect_majority_base',
+        'ambiance_aspect_majority_base',
+        'intervention_type',
+        'intervention_aspect_base',
+        'intervention_aspect_counterfactual',
+        'opentable_metadata_base',
+        'prediction_base'
+    ]
+
+    pairs_dataset_no_leakage = pairs_dataset.copy()[allowed_columns]
+
     # get explanations
     if isinstance(explainer, CausalExplainer):
         explanations = explainer.estimate_icace(
@@ -182,72 +230,18 @@ def cebab_pipeline(
     
     # append explanations to the pairs
     pairs_dataset['EICaCE'] = explanations
-    
-    # TODO: add cosine
+
     pairs_dataset = metric_utils._calculate_ite(pairs_dataset)  # effect of crowd-workers on other crowd-workers (no model, no explainer)
-    
-    def _calculate_icace(pairs):
-        """
-        This metric measures the effect of a certain concept on the given model.
-        It is independent of the explainer.
-        """
-        pairs['ICaCE'] = (pairs['prediction_counterfactual'] - pairs['prediction_base']).apply(lambda x: np.round(x, decimals=4))
-
-        return pairs
-    pairs_dataset = _calculate_icace(pairs_dataset)  # effect of concept on the model (with model, no explainer)
-    
-    # TOREMOVE: just to try if we ignore all [0,0,...] cases here.
-    # zeros_like = tuple([0.0 for i in range(int(dataset_type.split("-")[0]))])
-    # pairs_dataset = pairs_dataset[pairs_dataset.ICaCE.map(tuple).isin([zeros_like])==False]
-    
-    def _cosine_distance(a,b,epsilon):
-        if epsilon == None:
-            if np.linalg.norm(a, ord=2) == 0 or np.linalg.norm(b, ord=2) == 0:
-                return 1
-            else:
-                return cosine(a,b)
-        
-        if np.linalg.norm(a, ord=2) == 0 and np.linalg.norm(b, ord=2) == 0:
-            """
-            We cannot determine whether prediction is corrected or not.
-            Thus, we simply return 1.
-            """
-            return 1
-        elif np.linalg.norm(a, ord=2) == 0:
-            """
-            When true iCACE score is 0, instead of always returning 1, we
-            allow some epsilon error by default. If the EiCACE is within a
-            range, we return the error as 0.
-            """
-            if np.max(np.abs(b)) <= epsilon:
-                return 0
-            else:
-                return 1
-        elif np.linalg.norm(b, ord=2) == 0:
-            """
-            This case happens when iCACE is not 0, but EiCACE is 0. This is
-            unlikely, but we give score of 1 for this case.
-            """
-            return 1
-        else:
-            return cosine(a,b)
-    
-    def _calculate_estimate_loss(pairs,epsilon):
-        """
-        Calculate the distance between the ICaCE and EICaCE.
-        """
-
-        pairs['ICaCE-L2'] = pairs[['ICaCE', 'EICaCE']].apply(lambda x: np.linalg.norm(x[0] - x[1], ord=2), axis=1)
-        pairs['ICaCE-cosine'] = pairs[['ICaCE', 'EICaCE']].apply(lambda x: _cosine_distance(x[0], x[1], epsilon), axis=1)
-        pairs['ICaCE-normdiff'] = pairs[['ICaCE', 'EICaCE']].apply(lambda x: abs(np.linalg.norm(x[0], ord=2) - np.linalg.norm(x[1], ord=2)), axis=1)
-
-        return pairs
-    
-    pairs_dataset = _calculate_estimate_loss(pairs_dataset,correction_epsilon)  # l2 CEBaB Score (model and explainer)
+    pairs_dataset = metric_utils._calculate_icace(pairs_dataset)  # effect of concept on the model (with model, no explainer)
+    pairs_dataset = metric_utils._calculate_estimate_loss(pairs_dataset)  # l2 CEBaB Score (model and explainer)
 
     # only keep columns relevant for metrics
     CEBaB_metrics_per_pair = pairs_dataset[[
-        'intervention_type', 'intervention_aspect_base', 'intervention_aspect_counterfactual', 'ITE', 'ICaCE', 'EICaCE', 'ICaCE-L2', 'ICaCE-cosine', 'ICaCE-normdiff']].copy()
+        'intervention_type', 'intervention_aspect_base', 
+        'intervention_aspect_counterfactual', 'ITE', 
+        'ICaCE', 'EICaCE', 'ICaCE-L2', 'ICaCE-cosine', 
+        'ICaCE-normdiff'
+    ]].copy()
     CEBaB_metrics_per_pair['count'] = 1
 
     # get CEBaB tables
@@ -298,8 +292,10 @@ def cebab_pipeline(
     performance_report_col = [model_name]
     performance_report = pd.DataFrame(data=performance_report_data, index=performance_report_index, columns=performance_report_col)
 
-    return pairs_dataset, ATE, CEBaB_metrics, CEBaB_metrics_per_aspect_direction, CEBaB_metrics_per_aspect, CaCE_per_aspect_direction, ACaCE_per_aspect, performance_report
-
+    return pairs_dataset, ATE, CEBaB_metrics, CEBaB_metrics_per_aspect_direction, \
+        CEBaB_metrics_per_aspect, CaCE_per_aspect_direction, \
+        ACaCE_per_aspect, performance_report
+    
 def intervene_neuron_logits(
     explanator, hidden_reprs, counterfactual_reprs, neuron_id
 ):

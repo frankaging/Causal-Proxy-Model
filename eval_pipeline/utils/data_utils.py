@@ -13,6 +13,7 @@ def unpack_batches(batches):
 def preprocess_hf_dataset(dataset, verbose=0, dataset_type='5-way'):
     """
     Preprocess the CEBaB dataset loaded from HuggingFace.
+
     Drop 'no majority' data, encode all labels as ints.
     """
     assert dataset_type in ['2-way', '3-way', '5-way']
@@ -47,6 +48,7 @@ def preprocess_hf_dataset(dataset, verbose=0, dataset_type='5-way'):
 def preprocess_hf_dataset_inclusive(dataset, verbose=0, dataset_type='5-way'):
     """
     Preprocess the CEBaB dataset loaded from HuggingFace.
+
     Drop 'no majority' data, encode all labels as ints.
     """
     assert dataset_type in ['2-way', '3-way', '5-way']

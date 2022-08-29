@@ -654,7 +654,8 @@ class BertEncoder(nn.Module):
             self.interchange_hidden_layer = config.interchange_hidden_layer
         except:
             self.interchange_hidden_layer = 12
-            
+        self.num_of_cls_token = int((config.intervention_h_dim*4)/config.hidden_size)
+        
     def forward(
         self,
         hidden_states: torch.Tensor,
@@ -727,21 +728,28 @@ class BertEncoder(nn.Module):
                 if self.config.add_cross_attention:
                     all_cross_attentions = all_cross_attentions + (layer_outputs[2],)
                     
-            # INT_POINT: only the last layer!
             if base_intervention_corr is not None and source_hidden_states is not None and i == self.interchange_hidden_layer-1:
                 for b in range(0, hidden_states.shape[0]):
                     if base_intervention_corr[b] != -1:
                         start_idx = base_intervention_corr[b]*self.intervention_h_dim
                         end_idx = (base_intervention_corr[b]+1)*self.intervention_h_dim
+                        """
+                        WARNING:
+
+                        We simply assume the start_idx and end_idx are both locate in same
+                        CLS token. It cannot span across multiple tokens.
+                        """
+                        cls_token_idx = int(start_idx/self.config.hidden_size)
                         # we support where the pass in source_hidden_states
                         # is a partial one only for the interchanging aspect.
-                        if not isinstance(source_hidden_states, tuple) and hidden_states.shape[-1] != source_hidden_states.shape[-1]:
-                            hidden_states[b][0][start_idx:end_idx] = source_hidden_states[b]
+                        if not isinstance(source_hidden_states, tuple) and \
+                            hidden_states.shape[-1] != source_hidden_states.shape[-1]:
+                            hidden_states[b][cls_token_idx][start_idx:end_idx] = source_hidden_states[b]
                             # hidden_states[b][0][start_idx:end_idx] += source_hidden_states[b]
                         else:
-                            hidden_states[b][0][start_idx:end_idx] = \
-                                source_hidden_states[i+1][b][0][start_idx:end_idx]
-
+                            hidden_states[b][cls_token_idx][start_idx:end_idx] = \
+                                source_hidden_states[i+1][b][cls_token_idx][start_idx:end_idx] 
+                            
         if output_hidden_states:
             all_hidden_states = all_hidden_states + (hidden_states,)
 
@@ -764,21 +772,6 @@ class BertEncoder(nn.Module):
             attentions=all_self_attentions,
             cross_attentions=all_cross_attentions,
         )
-
-
-class BertPooler(nn.Module):
-    def __init__(self, config):
-        super().__init__()
-        self.dense = nn.Linear(config.hidden_size, config.hidden_size)
-        self.activation = nn.Tanh()
-
-    def forward(self, hidden_states: torch.Tensor) -> torch.Tensor:
-        # We "pool" the model by simply taking the hidden state corresponding
-        # to the first token.
-        first_token_tensor = hidden_states[:, 0]
-        pooled_output = self.dense(first_token_tensor)
-        pooled_output = self.activation(pooled_output)
-        return pooled_output
 
 
 class BertPredictionHeadTransform(nn.Module):
@@ -1282,17 +1275,41 @@ class BertForPreTraining(BertPreTrainedModel):
             attentions=outputs.attentions,
         )
     
+class BertPooler(nn.Module):
+    def __init__(self, config):
+        super().__init__()
+        hidden_size = max(config.hidden_size, config.intervention_h_dim*4)
+        self.dense = nn.Linear(hidden_size, hidden_size)
+        self.activation = nn.Tanh()
+        self.num_of_cls_token = max(1, int((config.intervention_h_dim*4)/config.hidden_size))
+
+    def forward(self, hidden_states: torch.Tensor) -> torch.Tensor:
+        # We "pool" the model by simply taking the hidden state corresponding
+        # to the first token.
+        first_token_tensor = hidden_states[:, 0:self.num_of_cls_token]
+        first_token_tensor = first_token_tensor.view(first_token_tensor.shape[0], -1)
+        pooled_output = self.dense(first_token_tensor)
+        pooled_output = self.activation(pooled_output)
+        return pooled_output
+    
 class BertNonlinearClassificationHead(nn.Module):
     """Head for sentence-level classification tasks. Identical to RobertaClassificationHead."""
 
     def __init__(self, config):
         super().__init__()
-        self.dense = nn.Linear(config.hidden_size, config.hidden_size)
+        hidden_size = max(config.hidden_size, config.intervention_h_dim*4)
+        self.dense = nn.Linear(
+            hidden_size, hidden_size
+        )
         classifier_dropout = (
             config.classifier_dropout if config.classifier_dropout is not None else config.hidden_dropout_prob
         )
-        self.dropout = nn.Dropout(classifier_dropout)
-        self.out_proj = nn.Linear(config.hidden_size, config.num_labels)
+        self.dropout = nn.Dropout(
+            classifier_dropout
+        )
+        self.out_proj = nn.Linear(
+            hidden_size, config.num_labels
+        )
 
     def forward(self, features, **kwargs):
         x = features  # features is the pooled [CLS] token
@@ -1334,6 +1351,9 @@ class IITBERTForSequenceClassification(BertPreTrainedModel):
             self.interchange_hidden_layer = config.interchange_hidden_layer
         except:
             self.interchange_hidden_layer = 12
+            
+        self.num_of_cls_token = max(1, int((config.intervention_h_dim*4)/config.hidden_size))
+        
         # Initialize weights and apply final processing
         self.post_init()
 
@@ -1377,7 +1397,7 @@ class IITBERTForSequenceClassification(BertPreTrainedModel):
         if cls_hidden_reprs is not None:
             # we also need to all the pooler once if configured.
             pooled_output = self.bert.pooler(cls_hidden_reprs) if self.bert.pooler is not None else None
-            before_pooled_output = cls_hidden_reprs[:, 0]
+            before_pooled_output = cls_hidden_reprs[:, 0:self.num_of_cls_token]
         else:
             outputs = self.bert(
                 input_ids,
@@ -1398,11 +1418,12 @@ class IITBERTForSequenceClassification(BertPreTrainedModel):
                 return_dict=return_dict,
             )
             pooled_output = outputs.pooler_output
-            before_pooled_output = outputs.hidden_states[self.interchange_hidden_layer][:, 0]
+            before_pooled_output = outputs.hidden_states[self.interchange_hidden_layer][:, 0:self.num_of_cls_token]
 
         pooled_output = self.dropout(pooled_output)
         logits = self.classifier(pooled_output)
         
+        before_pooled_output = before_pooled_output.view(before_pooled_output.shape[0], -1)
         mul_logits_0 = self.multitask_classifier(before_pooled_output[:,:self.intervention_h_dim])
         mul_logits_1 = self.multitask_classifier(before_pooled_output[:,self.intervention_h_dim:self.intervention_h_dim*2])
         mul_logits_2 = self.multitask_classifier(before_pooled_output[:,self.intervention_h_dim*2:self.intervention_h_dim*3])

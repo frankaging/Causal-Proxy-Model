@@ -41,6 +41,7 @@ from models.modelings_gpt2 import *
 from models.modelings_lstm import *
 from ProxyTrainer import *
 from eval_pipeline.utils.data_utils import *
+from eval_pipeline.utils.data_utils import _get_intervention_type_and_direction, _pairs_to_onehot
 
 # Will error if the minimal version of Transformers is not installed. Remove at your own risks.
 task_to_keys = {
@@ -69,15 +70,7 @@ class DataTrainingArguments:
         default=None,
         metadata={"help": "The name of the task to train on: " +
                   ", ".join(task_to_keys.keys())},
-    )
-    train_split_name: Optional[str] = field(
-        default="train",
-        metadata={"help": "The name of split this is trained on."},
-    )
-    eval_split_name: Optional[str] = field(
-        default="validation",
-        metadata={"help": "The name of split this is evaluated with."},
-    )  
+    ) 
     dataset_name: Optional[str] = field(
         default=None, metadata={"help": "The name of the dataset to use (via the datasets library)."}
     )
@@ -259,7 +252,18 @@ class ModelArguments:
         default=12,
         metadata={
             "help": "The interchange layer for transformer-based model. Only BERT work now!"}
+    )   
+    early_stopping_patience: int = field(
+        default=None,
+        metadata={
+            "help": "If we do early stopping with in-training evaluation performance."}
     )
+
+    enforce_distillation_only: bool = field(
+        default=False,
+        metadata={
+            "help": "whether to only enforce distillation on non-pairing example pairs."}
+    ) 
         
 # In[ ]:
 
@@ -295,9 +299,6 @@ def main():
     transformers.utils.logging.set_verbosity(log_level)
     transformers.utils.logging.enable_default_handler()
     transformers.utils.logging.enable_explicit_format()
-    
-    # we need to config stuffs based on the model name.
-    training_args.save_steps = 999999
     
     # make the name shorter.
     # overwrite the output dir a little bit.
@@ -392,7 +393,8 @@ def main():
         dataset_type = "5-way"
     else:
         assert False
-    (train_exclusive, train_inclusive), eval_dataset, test_dataset = preprocess_hf_dataset_inclusive(
+        
+    (train_exclusive, train_inclusive), eval_dataset, _ = preprocess_hf_dataset_inclusive(
         raw_datasets, verbose=1, dataset_type=dataset_type
     )
     assert model_args.counterfactual_type in {"true", "approximate"}
@@ -402,13 +404,95 @@ def main():
         dataset_type=dataset_type,
         approximate=True if model_args.counterfactual_type == "approximate" else False
     )
-    # do some special column filtering and renaming!
+    train_pairs_dataset["is_counterfactual_pairs"] = 1
+    
+    if model_args.counterfactual_type == "true":
+        """
+        This is a data augmentation step for CPM. In this augmented fragment, both examples in
+        a pair are the same examples. We are basically enforcing an null effect when we interchange
+        an example with a matched aspect label.
+
+        E.g.,
+        "the food is good but the service is bad.", change "food" from positive to positive.
+        ^the logit change should be all 0 in this null effect case.
+        """
+        # lets augment train_pairs_dataset with those null effect pairs from train_dataset.
+        train_dataset_null_base = train_dataset.rename(columns=lambda x: x + '_base')
+        train_dataset_null_counterfactual = train_dataset.rename(columns=lambda x: x + '_counterfactual')
+        train_dataset_null_pairs = pd.concat([train_dataset_null_base, train_dataset_null_counterfactual], axis=1)
+        train_dataset_null_pairs = _get_intervention_type_and_direction(train_dataset_null_pairs)
+        train_dataset_null_pairs = train_dataset_null_pairs[
+            (train_dataset_null_pairs['intervention_aspect_base'] != '') & \
+            (train_dataset_null_pairs['intervention_aspect_counterfactual'] != '')
+        ]
+        train_dataset_null_pairs = _pairs_to_onehot(train_dataset_null_pairs, dataset_type=dataset_type)
+        oversample_factor_null_effect_pairs = 1.0
+        if oversample_factor_null_effect_pairs is not None:
+            sample_n = int(len(train_pairs_dataset)*oversample_factor_null_effect_pairs)
+            if len(train_dataset_null_pairs) > sample_n:
+                train_dataset_null_pairs = train_dataset_null_pairs.sample(sample_n)
+
+        # lets insert a col to indicate whether it is null effect or not.
+        train_dataset_null_pairs["is_counterfactual_pairs"] = 0
+        train_pairs_dataset = pd.concat([train_pairs_dataset, train_dataset_null_pairs]).reset_index(drop=True)
+        
+        max_number_of_true_counterfactuals = 19684
+        if model_args.k > max_number_of_true_counterfactuals:
+            model_args.k = max_number_of_true_counterfactuals
+        training_args.num_train_epochs = int((len(train_pairs_dataset)+(max_number_of_true_counterfactuals-model_args.k))/len(train_pairs_dataset))*30.0
+        logger.warning(
+            f"Scaling the training epoch number = {training_args.num_train_epochs} based on maximum true counterfactuals."
+        )
+    
+    # do some special column filtering!
     train_columns_to_keep = [
         'original_id', 'edit_id', 'is_original', 
         'description', 'review_majority',
         'food_aspect_majority', 'ambiance_aspect_majority', 
-        'service_aspect_majority', 'noise_aspect_majority'
+        'service_aspect_majority', 'noise_aspect_majority',
     ]
+    train_dataset = train_dataset[train_columns_to_keep]
+    
+    train_pairs_columns_to_keep = [
+        "original_id_base", "edit_id_base", "edit_id_counterfactual",
+        "description_base", 
+        "description_counterfactual", "intervention_type",
+        "intervention_aspect_counterfactual",
+        'food_aspect_majority_base', 'ambiance_aspect_majority_base', 
+        'service_aspect_majority_base', 'noise_aspect_majority_base',
+        'food_aspect_majority_counterfactual', 'ambiance_aspect_majority_counterfactual', 
+        'service_aspect_majority_counterfactual', 'noise_aspect_majority_counterfactual',
+        "is_counterfactual_pairs"
+    ]
+    train_pairs_dataset = train_pairs_dataset[train_pairs_columns_to_keep]
+    
+    # for validation set, we also preprocess!
+    eval_pairs_dataset = get_intervention_pairs(eval_dataset, dataset_type=dataset_type)
+    eval_pairs_columns_to_keep = [
+        "original_id_base", "edit_id_base", "edit_id_counterfactual",
+        "description_base", 
+        "description_counterfactual", "intervention_type",
+        "intervention_aspect_counterfactual",
+        'food_aspect_majority_base', 'ambiance_aspect_majority_base', 
+        'service_aspect_majority_base', 'noise_aspect_majority_base',
+        'food_aspect_majority_counterfactual', 'ambiance_aspect_majority_counterfactual', 
+        'service_aspect_majority_counterfactual', 'noise_aspect_majority_counterfactual',
+    ]
+    eval_pairs_dataset = eval_pairs_dataset[eval_pairs_columns_to_keep]
+    # we also sample approximate counterfactuals for CPM to evaluate!
+    description_approximate = []
+    for index, row in eval_pairs_dataset.iterrows():
+        description_base = row['description_base']
+        intervention_type = row['intervention_type']
+        intervention_aspect_counterfactual = row['intervention_aspect_counterfactual']
+        satisfied_rows = train_dataset[
+            (train_dataset[f"{intervention_type}_aspect_majority"]==intervention_aspect_counterfactual)
+        ]
+        sampled_source = satisfied_rows.sample().iloc[0]
+        description_approximate += [sampled_source["description"]]
+    eval_pairs_dataset["description_approximate"] = description_approximate
+
+    # renaming and reencoding!
     aspect_label_encode = {
         "Negative":0,
         "Positive":1,
@@ -421,40 +505,27 @@ def main():
         "noise":2,
         "service": 3,
     }
-    new_dfs = []
-    for _df in [train_dataset, eval_dataset, test_dataset]:
-        _df = _df[train_columns_to_keep].rename(
-            columns={
-                'description': 'text', 
-                'review_majority': 'label',
-                'food_aspect_majority': 'food_label',
-                'ambiance_aspect_majority': 'ambiance_label',
-                'service_aspect_majority': 'service_label',
-                'noise_aspect_majority': 'noise_label'
-            }
-        )
-        _df = _df.replace("", -1).replace(
-            {
-                "food_label": aspect_label_encode,
-                "ambiance_label": aspect_label_encode,
-                "service_label": aspect_label_encode,
-                "noise_label": aspect_label_encode
-            }
-        )
-        new_dfs += [_df]
-    train_dataset, eval_dataset, test_dataset = new_dfs[0], new_dfs[1], new_dfs[2]
+
+    train_dataset = train_dataset.rename(
+        columns={
+            'description': 'text', 
+            'review_majority': 'label',
+            'food_aspect_majority': 'food_label',
+            'ambiance_aspect_majority': 'ambiance_label',
+            'service_aspect_majority': 'service_label',
+            'noise_aspect_majority': 'noise_label'
+        }
+    )
+    train_dataset = train_dataset.replace("", -1).replace(
+        {
+            "food_label": aspect_label_encode,
+            "ambiance_label": aspect_label_encode,
+            "service_label": aspect_label_encode,
+            "noise_label": aspect_label_encode
+        }
+    )
     
-    train_pairs_columns_to_keep = [
-        "original_id_base", "edit_id_base", "edit_id_counterfactual",
-        "description_base", 
-        "description_counterfactual", "intervention_type",
-        "intervention_aspect_counterfactual",
-        'food_aspect_majority_base', 'ambiance_aspect_majority_base', 
-        'service_aspect_majority_base', 'noise_aspect_majority_base',
-        'food_aspect_majority_counterfactual', 'ambiance_aspect_majority_counterfactual', 
-        'service_aspect_majority_counterfactual', 'noise_aspect_majority_counterfactual',
-    ]
-    train_pairs_dataset = train_pairs_dataset[train_pairs_columns_to_keep].rename(
+    train_pairs_dataset = train_pairs_dataset.rename(
         columns={
             'description_base': 'text', 
             'review_majority_base': 'label',
@@ -486,15 +557,49 @@ def main():
             "noise_label_counterfactual": aspect_label_encode
         }
     )
+    
+    eval_pairs_dataset = eval_pairs_dataset.rename(
+        columns={
+            'description_base': 'text', 
+            'review_majority_base': 'label',
+            'original_id_base': 'original_id',
+            'description_counterfactual': 'text_counterfactual', 
+            'description_approximate': 'text_approximate', 
+            'intervention_type': 'intervention_aspect',
+            'intervention_aspect_counterfactual': 'intervention_aspect_label',
+            'food_aspect_majority_base': 'food_label_base',
+            'ambiance_aspect_majority_base': 'ambiance_label_base',
+            'service_aspect_majority_base': 'service_label_base',
+            'noise_aspect_majority_base': 'noise_label_base',
+            'food_aspect_majority_counterfactual': 'food_label_counterfactual',
+            'ambiance_aspect_majority_counterfactual': 'ambiance_label_counterfactual',
+            'service_aspect_majority_counterfactual': 'service_label_counterfactual',
+            'noise_aspect_majority_counterfactual': 'noise_label_counterfactual'
+        }
+    )
+    
+    eval_pairs_dataset = eval_pairs_dataset.replace("", -1).replace(
+        {
+            "intervention_aspect": aspect_encode,
+            "intervention_aspect_label": aspect_label_encode,
+            "food_label_base": aspect_label_encode,
+            "ambiance_label_base": aspect_label_encode,
+            "service_label_base": aspect_label_encode,
+            "noise_label_base": aspect_label_encode,
+            "food_label_counterfactual": aspect_label_encode,
+            "ambiance_label_counterfactual": aspect_label_encode,
+            "service_label_counterfactual": aspect_label_encode,
+            "noise_label_counterfactual": aspect_label_encode
+        }
+    )
+    
     train_dataset = Dataset.from_pandas(train_dataset)
     train_pairs_dataset = Dataset.from_pandas(train_pairs_dataset)
-    eval_dataset = Dataset.from_pandas(eval_dataset)
-    test_dataset = Dataset.from_pandas(test_dataset)
+    eval_pairs_dataset = Dataset.from_pandas(eval_pairs_dataset)
     raw_datasets = DatasetDict()
     raw_datasets['train'] = train_dataset
     raw_datasets['train_pairs'] = train_pairs_dataset
-    raw_datasets['validation'] = eval_dataset
-    raw_datasets['test'] = test_dataset
+    raw_datasets['validation_pairs'] = eval_pairs_dataset
 
     label_list = sorted(list(set(train_dataset[label_key])))
     num_labels = len(label_list)
@@ -522,11 +627,17 @@ def main():
         use_auth_token=True if model_args.use_auth_token else None,
     )
     config.intervention_h_dim = model_args.intervention_h_dim
-    assert config.intervention_h_dim*4 <= config.hidden_size
+    if model_args.interchange_hidden_layer == 12 and "lstm" not in model_args.model_name_or_path:
+        # if it is the last layer, we don't allow this to be overfloating over the
+        # whole classification token reprs.
+        assert config.intervention_h_dim*4 <= config.hidden_size
+    if config.intervention_h_dim*4 > config.hidden_size:
+        assert (config.intervention_h_dim*4)%config.hidden_size == 0 # we just enforce this.
+
     logger.warning(
         f"Hey, per aspect this is the size you are interchange with: {config.intervention_h_dim}"
     )
-        
+    
     tokenizer = AutoTokenizer.from_pretrained(
         model_args.tokenizer_name if model_args.tokenizer_name else model_args.model_name_or_path,
         cache_dir=model_args.cache_dir,
@@ -555,6 +666,7 @@ def main():
     low_level_config.attention_probs_dropout_prob = model_args.encoder_dropout
     # sanity check.
     if "bert-base-uncased" in model_args.high_level_model_type_or_path:
+        low_level_config.interchange_hidden_layer = model_args.interchange_hidden_layer
         low_level_config.interchange_hidden_layer = model_args.interchange_hidden_layer
         
     if "lstm" in model_args.model_name_or_path:
@@ -596,6 +708,10 @@ def main():
     low_level_model = InterventionableIITTransformerForSequenceClassification(
         model=model,
     )
+    
+    # if this is overfloating, we need to change the tokenizer a bit!
+    num_of_cls_token = max(1, int((config.intervention_h_dim*4)/config.hidden_size))
+    cls_token_id = tokenizer.pad_token_id if tokenizer.cls_token_id == None else tokenizer.cls_token_id
     
     if "bert" in model_args.high_level_model_type_or_path or \
         "gpt" in model_args.high_level_model_type_or_path:
@@ -699,15 +815,25 @@ def main():
         )
     max_seq_length = min(data_args.max_seq_length, tokenizer.model_max_length)
     
-    def preprocess_function(examples):
+    def preprocess_function(examples):            
         # Tokenize the texts
-        if 'text_counterfactual' in examples:
+        if 'text_approximate' in examples and 'text_counterfactual' in examples:
             result = tokenizer(examples['text'], padding=padding,
                                max_length=max_seq_length, truncation=True)
             result_counterfactual = tokenizer(examples['text_counterfactual'], padding=padding,
                                max_length=max_seq_length, truncation=True)
             result["input_ids_counterfactual"] = result_counterfactual["input_ids"]
-            result["token_type_ids_counterfactual"] = result_counterfactual["token_type_ids"]
+            result["attention_mask_counterfactual"] = result_counterfactual["attention_mask"]
+            result_approximate = tokenizer(examples['text_approximate'], padding=padding,
+                               max_length=max_seq_length, truncation=True)
+            result["input_ids_approximate"] = result_approximate["input_ids"]
+            result["attention_mask_approximate"] = result_approximate["attention_mask"]
+        elif 'text_counterfactual' in examples:
+            result = tokenizer(examples['text'], padding=padding,
+                               max_length=max_seq_length, truncation=True)
+            result_counterfactual = tokenizer(examples['text_counterfactual'], padding=padding,
+                               max_length=max_seq_length, truncation=True)
+            result["input_ids_counterfactual"] = result_counterfactual["input_ids"]
             result["attention_mask_counterfactual"] = result_counterfactual["attention_mask"]
         else:
             result = tokenizer(examples['text'], padding=padding,
@@ -742,7 +868,7 @@ def main():
             f"Sample with max_train_samples={max_train_samples}."
             )
 
-    eval_dataset = raw_datasets[data_args.eval_split_name]
+    eval_dataset = raw_datasets["validation_pairs"]
     if data_args.max_eval_samples is not None:
         eval_dataset = eval_dataset.select(
             range(data_args.max_eval_samples))
@@ -766,6 +892,11 @@ def main():
     else:
         data_collator = None
     
+    if "gpt" in model_args.model_name_or_path:
+        any_batch_size = 256
+    else:
+        any_batch_size = 1024
+    
     # Initialize our Trainer
     trainer = CausalProxyModelTrainer(
         low_level_model=low_level_model,
@@ -780,14 +911,18 @@ def main():
         beta=model_args.beta,
         gemma=model_args.gemma,
         wandb_metadata=model_args.wandb_metadata,
+        early_stopping_patience=model_args.early_stopping_patience,
+        enforce_distillation_only=model_args.enforce_distillation_only,
+        num_of_cls_token=num_of_cls_token,
+        cls_token_id=cls_token_id,
+        any_batch_size=any_batch_size,
     )
     
     if training_args.do_train:
         logger.info("Hey Zen: Life is sad? Let's go get some drinks.")
         trainer.train()
     
-    if training_args.do_eval:
-        trainer.evaluate()
+    # trainer.evaluate()
 
 # In[ ]:
 
