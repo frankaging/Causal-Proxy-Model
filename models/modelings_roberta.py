@@ -602,10 +602,7 @@ class RobertaEncoder(nn.Module):
         self.layer = nn.ModuleList([RobertaLayer(config) for _ in range(config.num_hidden_layers)])
         self.gradient_checkpointing = False
         self.intervention_h_dim = config.intervention_h_dim
-        try:
-            self.interchange_hidden_layer = config.interchange_hidden_layer
-        except:
-            self.interchange_hidden_layer = 12
+        self.interchange_hidden_layer = config.interchange_hidden_layer
         self.num_of_cls_token = int((config.intervention_h_dim*4)/config.hidden_size)
         
     def forward(
@@ -973,10 +970,7 @@ class IITRobertaForSequenceClassification(RobertaPreTrainedModel):
             config, num_aspect_labels
         )
         self.intervention_h_dim = config.intervention_h_dim
-        try:
-            self.interchange_hidden_layer = config.interchange_hidden_layer
-        except:
-            self.interchange_hidden_layer = 12
+        self.interchange_hidden_layer = config.interchange_hidden_layer
         
         self.num_of_cls_token = max(1, int((config.intervention_h_dim*4)/config.hidden_size))
         # Initialize weights and apply final processing

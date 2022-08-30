@@ -267,6 +267,7 @@ class IITLSTMForSequenceClassification(BertPreTrainedModel): # fake overhead loa
         self.dropout = nn.Dropout(classifier_dropout)
         self.classifier = LSTMNonlinearClassificationHead(config)
         self.intervention_h_dim = config.intervention_h_dim
+        self.interchange_hidden_layer = config.interchange_hidden_layer
         self.multitask_classifier = MultiTaskClassificationHead(
             config, num_aspect_labels
         )

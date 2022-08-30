@@ -94,10 +94,7 @@ class CausalProxyModelForLSTM(Explainer, CausalExplainer):
             cache_dir=cache_dir,
             use_auth_token=True if "CEBaB/" in cpm_model_path else False,
         )
-        try:
-            cpm_config.intervention_h_dim = cpm_config.intervention_h_dim
-        except:
-            cpm_config.intervention_h_dim = intervention_h_dim
+
         print(f"intervention_h_dim={cpm_config.intervention_h_dim}")
         cpm_model = IITLSTMForSequenceClassification.from_pretrained(
             cpm_model_path,

@@ -627,13 +627,16 @@ def main():
         use_auth_token=True if model_args.use_auth_token else None,
     )
     config.intervention_h_dim = model_args.intervention_h_dim
-    if model_args.interchange_hidden_layer == 12 and "lstm" not in model_args.model_name_or_path:
+    config.interchange_hidden_layer = model_args.interchange_hidden_layer
+    if model_args.interchange_hidden_layer == 12:
         # if it is the last layer, we don't allow this to be overfloating over the
         # whole classification token reprs.
         assert config.intervention_h_dim*4 <= config.hidden_size
     if config.intervention_h_dim*4 > config.hidden_size:
         assert (config.intervention_h_dim*4)%config.hidden_size == 0 # we just enforce this.
-
+    if "lstm" in model_args.model_name_or_path:
+        assert model_args.interchange_hidden_layer == 1
+        
     logger.warning(
         f"Hey, per aspect this is the size you are interchange with: {config.intervention_h_dim}"
     )
@@ -664,10 +667,6 @@ def main():
     low_level_config.classifier_dropout = model_args.classifier_dropout
     low_level_config.hidden_dropout_prob = model_args.encoder_dropout
     low_level_config.attention_probs_dropout_prob = model_args.encoder_dropout
-    # sanity check.
-    if "bert-base-uncased" in model_args.high_level_model_type_or_path:
-        low_level_config.interchange_hidden_layer = model_args.interchange_hidden_layer
-        low_level_config.interchange_hidden_layer = model_args.interchange_hidden_layer
         
     if "lstm" in model_args.model_name_or_path:
         low_level_config.update_embeddings=False
