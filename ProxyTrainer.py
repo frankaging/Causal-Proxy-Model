@@ -35,6 +35,7 @@ class CausalProxyModelTrainer(Trainer):
         self.enforce_distillation_only = enforce_distillation_only
         self.num_of_cls_token = num_of_cls_token
         self.cls_token_id = cls_token_id
+        self.any_batch_size = any_batch_size
         self.aspect_encode = {
             0: "ambiance",
             1: "food",
@@ -374,6 +375,8 @@ class CausalProxyModelTrainer(Trainer):
         
         with torch.no_grad():
             any_batch_size = 128
+            if self.any_batch_size == 256:
+                any_batch_size = 64
             eval_estimate_icace = []
             eval_dataloader = self.get_any_dataloader(
                 self.eval_dataset, any_batch_size=any_batch_size
