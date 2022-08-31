@@ -432,6 +432,10 @@ class CausalProxyModelTrainer(Trainer):
         eval_icace = torch.tensor(eval_icace).float()
         cosine_metric = 1. - torch.nn.functional.cosine_similarity(eval_estimate_icace, eval_icace, dim=1)
         cosine_metric = torch.mean(cosine_metric)
+        
+        # put back into training mode.
+        self.low_level_model.model.train()
+        
         # report to wandb.
         log_eval = open(os.path.join(self.args.output_dir, 'eval_log.txt'), 'a', buffering=1)
         print('{},{},{}'.format(
