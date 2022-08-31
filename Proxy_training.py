@@ -443,6 +443,8 @@ def main():
         logger.warning(
             f"Scaling the training epoch number = {training_args.num_train_epochs} based on maximum true counterfactuals."
         )
+    elif model_args.counterfactual_type == "approximate":
+        pass
     
     # do some special column filtering!
     train_columns_to_keep = [
@@ -655,7 +657,7 @@ def main():
         model_constructor = IITBERTForSequenceClassification
     elif "gpt" in model_args.model_name_or_path:
         model_constructor = IITGPT2ForSequenceClassification
-    elif "lstm" in model_args.moderaw_counterfactual_datasetsl_name_or_path:
+    elif "lstm" in model_args.model_name_or_path:
         model_constructor = IITLSTMForSequenceClassification
     else:
         raise ValueError(
