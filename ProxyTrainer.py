@@ -124,7 +124,7 @@ class CausalProxyModelTrainer(Trainer):
                     input_ids = input_ids,
                     attention_mask = attention_mask
                 ).logits[0].cpu().detach())
-            logits_query = torch.concat(logits_query)
+            logits_query = torch.cat(logits_query)
             logits_query = np.round(logits_query.numpy(), decimals=16)
             updated_query_dataset["logits"] = list(logits_query)
         self.query_dataset = updated_query_dataset
@@ -154,11 +154,11 @@ class CausalProxyModelTrainer(Trainer):
                     attention_mask = attention_mask_counterfactual
                 ).logits[0].cpu().detach())
                 
-            logits_base = torch.concat(logits_base)
+            logits_base = torch.cat(logits_base)
             logits_base = np.round(logits_base.numpy(), decimals=16)
             updated_train_dataset["logits_base"] = list(logits_base)
             
-            logits_counterfactual = torch.concat(logits_counterfactual)
+            logits_counterfactual = torch.cat(logits_counterfactual)
             logits_counterfactual = np.round(logits_counterfactual.numpy(), decimals=16)
             updated_train_dataset["logits_counterfactual"] = list(logits_counterfactual)
          
@@ -190,10 +190,10 @@ class CausalProxyModelTrainer(Trainer):
                 icace = prediction_counterfactual - prediction_base
                 eval_icace.append(icace)
                 
-            eval_icace = torch.concat(eval_icace)
+            eval_icace = torch.cat(eval_icace)
             updated_eval_dataset["icace"] = list(eval_icace.numpy())
 
-            eval_prediction_base = torch.concat(eval_prediction_base)
+            eval_prediction_base = torch.cat(eval_prediction_base)
             updated_eval_dataset["prediction_base"] = list(eval_prediction_base.numpy())
 
         self.train_dataset = Dataset.from_pandas(updated_train_dataset)
@@ -427,7 +427,7 @@ class CausalProxyModelTrainer(Trainer):
                 estimate_icace = prediction_approximate - prediction_base
                 eval_estimate_icace.append(estimate_icace)
                 
-            eval_estimate_icace = torch.concat(eval_estimate_icace)
+            eval_estimate_icace = torch.cat(eval_estimate_icace)
         eval_icace = np.array([np.array(arr) for arr in self.eval_dataset.to_pandas()["icace"]])
         eval_icace = torch.tensor(eval_icace).float()
         cosine_metric = 1. - torch.nn.functional.cosine_similarity(eval_estimate_icace, eval_icace, dim=1)
