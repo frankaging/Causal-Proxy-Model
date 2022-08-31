@@ -190,6 +190,7 @@ class LSTMModel(nn.Module):
             enforce_sorted = False
         )  # a PackedSequence object, where 'data' is the flattened words (n_words, emb_size)
         
+        self.BiLSTM.flatten_parameters()
         # run through bidirectional LSTM (PyTorch automatically applies it on the PackedSequence)
         rnn_out, _ = self.BiLSTM(packed_words)  # a PackedSequence object, where 'data' is the output of the LSTM (n_words, 2 * rnn_size)
 
