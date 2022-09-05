@@ -6,6 +6,7 @@ In each of the model files, we have 3 types of models:
 """
 
 from libs import *
+from cpm import *
 
 class BERTForCEBaB(Model):
     def __init__(self, model_path, device='cpu', batch_size=64):
@@ -104,10 +105,6 @@ class CausalProxyModelForBERT(Explainer, CausalExplainer):
         
         self.tokenizer = AutoTokenizer.from_pretrained("bert-base-uncased")
         
-        self.num_of_cls_token = max(1, int((cpm_config.intervention_h_dim*4)/cpm_config.hidden_size))
-        self.cls_token_id = self.tokenizer.pad_token_id \
-            if self.tokenizer.cls_token_id == None else self.tokenizer.cls_token_id
-        
     def preprocess_predict_proba(self, df):
         x = self.tokenizer(df['description'].to_list(), padding=True, truncation=True, return_tensors='pt')
         y = df['review_majority'].astype(int)
@@ -204,23 +201,6 @@ class CausalProxyModelForBERT(Explainer, CausalExplainer):
                 base_attention_mask = base_x_batch['attention_mask']
                 source_input_ids = source_x_batch['input_ids']
                 source_attention_mask = source_x_batch['attention_mask']
-                # There is a case where we need to append extra CLS token
-                # for base and source sequence and attention mask.
-                if self.num_of_cls_token > 1:
-                    base_padded_cls_input_ids = (torch.ones(
-                        base_input_ids.shape[0], self.num_of_cls_token-1)*self.cls_token_id).long()
-                    base_padded_cls_attention_mask = torch.ones(
-                        base_input_ids.shape[0], self.num_of_cls_token-1).long()
-                    source_padded_cls_input_ids = (torch.ones(
-                        source_input_ids.shape[0], self.num_of_cls_token-1)*self.cls_token_id).long()
-                    source_padded_cls_attention_mask = torch.ones(
-                        source_input_ids.shape[0], self.num_of_cls_token-1).long()
-                    base_input_ids = torch.cat([base_padded_cls_input_ids, base_input_ids], dim=-1)
-                    base_attention_mask = torch.cat([base_padded_cls_attention_mask, base_attention_mask], dim=-1)
-                    source_input_ids = torch.cat([source_padded_cls_input_ids, source_input_ids], dim=-1)
-                    source_attention_mask = torch.cat(
-                        [source_padded_cls_attention_mask, source_attention_mask], dim=-1)
-                    
                 base_input_ids = base_input_ids.to(self.device)
                 base_attention_mask = base_attention_mask.to(self.device)
                 source_input_ids = source_input_ids.to(self.device)
@@ -242,6 +222,7 @@ class CausalProxyModelForBERT(Explainer, CausalExplainer):
         CPM_iTEs = CPM_iTEs.numpy()
         return list(CPM_iTEs)
     
+        
 class CausalMediationModelForBERT(Explainer, CausalExplainer):
     def __init__(
         self, 

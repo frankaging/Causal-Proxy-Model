@@ -55,6 +55,8 @@ from transformers.utils import (
 )
 from transformers.configuration_utils import PretrainedConfig
 
+from models.modelings_gpt2 import IITGPT2ForSequenceClassification
+
 logger = logging.get_logger(__name__)
 
 _CHECKPOINT_FOR_DOC = "bert-base-uncased"
@@ -1528,15 +1530,29 @@ class InterventionableIITTransformerForSequenceClassification():
             )
         
         if base_intervention_corr is not None:
-            counterfactual_outputs = self.model(
-                input_ids=base_input_ids,
-                attention_mask=base_attention_mask,
-                # counterfactual arguments
-                source_hidden_states=source_outputs["hidden_states"],
-                base_intervention_corr=base_intervention_corr,
-                source_intervention_corr=source_intervention_corr,
-                all_layers=self.all_layers,
-            )
+            if isinstance(self.model.module, IITGPT2ForSequenceClassification):
+                source_sequence_lengths = torch.ne(source_input_ids, self.model.module.config.pad_token_id).sum(-1) - 1
+                counterfactual_outputs = self.model(
+                    input_ids=base_input_ids,
+                    attention_mask=base_attention_mask,
+                    # counterfactual arguments
+                    source_hidden_states=source_outputs["hidden_states"],
+                    base_intervention_corr=base_intervention_corr,
+                    source_intervention_corr=source_intervention_corr,
+                    all_layers=self.all_layers,
+                    # gpt2 or generation model extra arguments,
+                    source_sequence_lengths=source_sequence_lengths,
+                )
+            else:
+                counterfactual_outputs = self.model(
+                    input_ids=base_input_ids,
+                    attention_mask=base_attention_mask,
+                    # counterfactual arguments
+                    source_hidden_states=source_outputs["hidden_states"],
+                    base_intervention_corr=base_intervention_corr,
+                    source_intervention_corr=source_intervention_corr,
+                    all_layers=self.all_layers,
+                )
         
         return base_outputs, source_outputs, counterfactual_outputs
     

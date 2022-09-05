@@ -42,6 +42,7 @@ class Trainer:
         self.last_loss = 0.0
         self.total_loss_epoch = 0.0
         self.n_iter = 0
+        self.n_total_step = 0
         self.epoch = 0
         self.n_total_iter = 0
         self.last_log = 0
@@ -49,6 +50,7 @@ class Trainer:
         self.n_sequences_epoch = 0
         self.n_effective_aspect_sequence_epoch = 0
         self.n_effective_iit_sequence_epoch = 0
+        self.is_early_stopped = False
         
         # last.
         self.total_loss_epoch = 0
@@ -101,7 +103,10 @@ class Trainer:
         # log to a local file
         log_train = open(os.path.join(self.args.output_dir, 'train_log.txt'), 'w', buffering=1)
         log_eval = open(os.path.join(self.args.output_dir, 'eval_log.txt'), 'w', buffering=1)
-        print('epoch,global_steps,step,loss,seq_cls_loss,mul_cls_loss,iit_cls_loss,seq_cls_acc,mul_cls_acc,iit_cls_acc', file=log_train)
+        print(
+            'epoch,global_step,loss,seq_cls_loss,mul_cls_loss,iit_cls_loss,seq_cls_acc,mul_cls_acc,iit_cls_acc', 
+            file=log_train
+        )
         print('epoch,global_steps,cosine_metric', file=log_eval)
         log_train.close()
         log_eval.close()
@@ -226,8 +231,8 @@ class Trainer:
     def log_tensorboard(self):
         
         log_train = open(os.path.join(self.args.output_dir, 'train_log.txt'), 'a', buffering=1)
-        print('{},{},{},{},{},{},{},{},{},{}'.format(
-                self.epoch+1, self.n_total_iter, self.n_iter, 
+        print('{},{},{},{},{},{},{},{},{}'.format(
+                self.epoch+1, self.n_total_step, 
                 self.averaged_loss,
                 self.averaged_seq_cls_loss, 
                 self.averaged_mul_cls_loss,
@@ -254,7 +259,7 @@ class Trainer:
                     "train/lr": float(self.lr_this_step),
                     "train/speed": time.time()-self.last_log,
                 }, 
-                step=self.n_total_iter
+                step=self.n_total_step
             )
         elif "none" in self.args.report_to:
             pass
@@ -276,10 +281,6 @@ class Trainer:
     def iter(self):
         self.n_iter += 1
         self.n_total_iter += 1
-        
-        if self.n_total_iter % self.args.logging_steps == 0:
-            self.log_tensorboard()
-            self.last_log = time.time()
     
     def optimize(self, loss):
 
@@ -289,11 +290,21 @@ class Trainer:
         self.iter()
         
         if (self.n_iter % self.args.gradient_accumulation_steps == 0) or \
-            (self.n_iter*self.train_batch_size >= len(self.train_dataset)):
+            (self.n_iter * self.train_batch_size >= len(self.train_dataset)):
             self.lr_this_step = self.optimizer.param_groups[0]['lr']
             self.optimizer.step()
             self.lr_scheduler.step()
             self.optimizer.zero_grad()
+            self.n_total_step += 1 # true gradient step, not inner training loop step!
+        
+            if self.n_total_step % self.args.logging_steps == 0:
+                self.log_tensorboard()
+                self.last_log = time.time()
+        
+            # we first evaluate current model, and see if we need early stop.
+            if self.n_total_step != 0 and \
+                self.n_total_step % self.args.save_steps == 0:
+                self.evaluate()
         
     def end_epoch(self):
         logger.info(f"{self.n_sequences_epoch} sequences have been trained during this epoch.")
@@ -331,12 +342,8 @@ class Trainer:
             train_dataloader = self.get_train_dataloader()
             iter_bar = tqdm(train_dataloader, desc="-Iter", disable=False)
             for batch in iter_bar:
-                # we first evaluate current model, and see if we need early stop.
-                if self.n_total_iter != 0 and \
-                    self.n_total_iter % self.args.save_steps == 0:
-                    if self.evaluate():
-                        is_stopped_early = True
-                        break
+                if self.is_early_stopped:
+                    break
                 prepared_batch = self.prepare_batch(batch)
                 self._step(*prepared_batch)
                 iter_bar.update()
@@ -346,14 +353,14 @@ class Trainer:
                         "Avg_cum_loss": f"{self.total_loss_epoch/self.n_iter:.2f}" if self.n_iter != 0 else 0.0, 
                     }
                 )
-            if is_stopped_early:
+            if self.is_early_stopped:
                 break
             iter_bar.close()
 
             logger.info(f"--- Ending epoch {self.epoch}/{self.args.num_train_epochs-1}")
             self.end_epoch()
         
-        if is_stopped_early == True:
+        if self.is_early_stopped == True:
             logger.info("Training is early stopped as we found the best performing model")
         else:
             logger.info("Training is finished")

@@ -433,6 +433,7 @@ class GPT2Model(GPT2PreTrainedModel):
         base_intervention_corr=None,
         source_intervention_corr=None,
         all_layers=None,
+        source_sequence_lengths=None,
         # counterfactual arguments
         output_attentions: Optional[bool] = None,
         output_hidden_states: Optional[bool] = None,
@@ -603,17 +604,19 @@ class GPT2Model(GPT2PreTrainedModel):
                         We simply assume the start_idx and end_idx are both locate in same
                         CLS token. It cannot span across multiple tokens.
                         """
-                        cls_token_idx = sequence_lengths[b]
+                        base_cls_token_idx = sequence_lengths[b]
                         # we support where the pass in source_hidden_states
                         # is a partial one only for the interchanging aspect.
                         
                         if not isinstance(source_hidden_states, tuple) and \
                             hidden_states.shape[-1] != source_hidden_states.shape[-1]:
-                            hidden_states[b][cls_token_idx][start_idx:end_idx] = source_hidden_states[b]
+                            hidden_states[b][base_cls_token_idx][start_idx:end_idx] = source_hidden_states[b]
                             # hidden_states[b][0][start_idx:end_idx] += source_hidden_states[b]
                         else:
-                            hidden_states[b][cls_token_idx][start_idx:end_idx] = \
-                                source_hidden_states[i+1][b][cls_token_idx][start_idx:end_idx] 
+                            assert source_sequence_lengths is not None
+                            source_cls_token_idx = source_sequence_lengths[b]
+                            hidden_states[b][base_cls_token_idx][start_idx:end_idx] = \
+                                source_hidden_states[i+1][b][source_cls_token_idx][start_idx:end_idx] 
             
             if use_cache is True:
                 presents = presents + (outputs[1],)
@@ -738,6 +741,7 @@ class IITGPT2ForSequenceClassification(GPT2PreTrainedModel):
         source_intervention_corr=None,
         all_layers=None,
         cls_hidden_reprs=None,
+        source_sequence_lengths=None,
         # counterfactual arguments
         use_cache: Optional[bool] = None,
         output_attentions: Optional[bool] = None,
@@ -790,6 +794,7 @@ class IITGPT2ForSequenceClassification(GPT2PreTrainedModel):
                 base_intervention_corr=base_intervention_corr,
                 source_intervention_corr=source_intervention_corr,
                 all_layers=all_layers,
+                source_sequence_lengths=source_sequence_lengths,
                 # counterfactual arguments
                 output_attentions=output_attentions,
                 output_hidden_states=True,

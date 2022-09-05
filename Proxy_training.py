@@ -5,6 +5,9 @@
 
 
 import os
+import sys
+sys.path.append(os.path.join(os.path.dirname("__file__"), '.'))
+
 import random
 import sys
 from dataclasses import dataclass, field
@@ -426,11 +429,17 @@ def main():
             (train_dataset_null_pairs['intervention_aspect_counterfactual'] != '')
         ]
         train_dataset_null_pairs = _pairs_to_onehot(train_dataset_null_pairs, dataset_type=dataset_type)
+        
         oversample_factor_null_effect_pairs = 1.0
+        max_number_of_null_pairs = int(min(oversample_factor_null_effect_pairs*19684, len(train_dataset_null_pairs)))
+        
         if oversample_factor_null_effect_pairs is not None:
             sample_n = int(len(train_pairs_dataset)*oversample_factor_null_effect_pairs)
             if len(train_dataset_null_pairs) > sample_n:
-                train_dataset_null_pairs = train_dataset_null_pairs.sample(sample_n)
+                train_dataset_null_pairs = train_dataset_null_pairs.sample(
+                    sample_n,
+                    random_state=training_args.seed,
+                )
 
         # lets insert a col to indicate whether it is null effect or not.
         train_dataset_null_pairs["is_counterfactual_pairs"] = 0
@@ -439,7 +448,7 @@ def main():
         max_number_of_true_counterfactuals = 19684
         if model_args.k > max_number_of_true_counterfactuals:
             model_args.k = max_number_of_true_counterfactuals
-        training_args.num_train_epochs = int((len(train_pairs_dataset)+(max_number_of_true_counterfactuals-model_args.k))/len(train_pairs_dataset))*30.0
+        training_args.num_train_epochs = int((max_number_of_null_pairs+max_number_of_true_counterfactuals)/len(train_pairs_dataset))*30.0
         logger.warning(
             f"Scaling the training epoch number = {training_args.num_train_epochs} based on maximum true counterfactuals."
         )

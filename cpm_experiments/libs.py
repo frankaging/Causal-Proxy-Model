@@ -2,6 +2,7 @@ import json
 import pickle
 import os, sys
 sys.path.append(os.path.join(os.path.dirname("__file__"), '..'))
+sys.path.append(os.path.join(os.path.dirname("__file__"), './modelings/'))
 import pandas as pd
 import datasets
 from collections import defaultdict
@@ -31,6 +32,8 @@ from models.modelings_roberta import *
 from models.modelings_bert import *
 from models.modelings_gpt2 import *
 from models.modelings_lstm import *
+
+from cpm import *
 
 from eval_pipeline.models.abstract_model import Model 
 from eval_pipeline.explainers.abstract_explainer import Explainer
@@ -129,10 +132,6 @@ def flatten_logits(
         columns=col_names
     )
     return df
-
-class CausalExplainer(object):
-    def __init__(self):
-        pass
 
 def cebab_pipeline(
     model, explainer, 

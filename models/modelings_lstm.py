@@ -221,9 +221,10 @@ class LSTMModel(nn.Module):
         # eq.12: h* = tanh(pooled_output)
         final_out = self.tanh(hidden_states)  # (batch_size, rnn_size)
         
+        
         if not return_dict:
             return (final_out, final_out) + final_out
-
+        
         return BaseModelOutputWithPoolingAndCrossAttentions(
             last_hidden_state=hidden_states,
             pooler_output=final_out,

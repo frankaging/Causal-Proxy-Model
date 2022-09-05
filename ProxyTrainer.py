@@ -442,7 +442,7 @@ class CausalProxyModelTrainer(Trainer):
         # report to wandb.
         log_eval = open(os.path.join(self.args.output_dir, 'eval_log.txt'), 'a', buffering=1)
         print('{},{},{}'.format(
-                self.epoch+1, self.n_total_iter, cosine_metric
+                self.epoch+1, self.n_total_step, cosine_metric
             ),
             file=log_eval
         )
@@ -452,7 +452,7 @@ class CausalProxyModelTrainer(Trainer):
                 {
                     "eval/cosine_metric": cosine_metric, 
                 }, 
-                step=self.n_total_iter
+                step=self.n_total_step
             )
 
         if cosine_metric < self.best_cosine_metric:
@@ -466,6 +466,5 @@ class CausalProxyModelTrainer(Trainer):
             if self.early_stopping_patience is not None and \
                 self.current_patience >= self.early_stopping_patience:
                 logger.info("Stopping our trainer(!) as exceeding the patience step.")
-                return True # stop
-        return False
+                self.is_early_stopped = True
             
