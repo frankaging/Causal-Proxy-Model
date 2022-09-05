@@ -1530,7 +1530,8 @@ class InterventionableIITTransformerForSequenceClassification():
             )
         
         if base_intervention_corr is not None:
-            if isinstance(self.model.module, IITGPT2ForSequenceClassification):
+            if (hasattr(self.model, 'module') and isinstance(self.model.module, IITGPT2ForSequenceClassification)) or \
+                (not hasattr(self.model, 'module') and isinstance(self.model, IITGPT2ForSequenceClassification)):
                 source_sequence_lengths = torch.ne(source_input_ids, self.model.module.config.pad_token_id).sum(-1) - 1
                 counterfactual_outputs = self.model(
                     input_ids=base_input_ids,
