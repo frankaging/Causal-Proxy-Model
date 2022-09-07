@@ -933,7 +933,7 @@ def main():
         data_collator = None
     
     if "gpt" in model_args.model_name_or_path:
-        any_batch_size = 256
+        any_batch_size = 192
     else:
         any_batch_size = 1024
     
