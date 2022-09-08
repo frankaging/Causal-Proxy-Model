@@ -431,7 +431,7 @@ def main():
         train_dataset_null_pairs = _pairs_to_onehot(train_dataset_null_pairs, dataset_type=dataset_type)
         
         oversample_factor_null_effect_pairs = 1.0
-        max_number_of_null_pairs = int(min(oversample_factor_null_effect_pairs*19684, len(train_dataset_null_pairs)))
+        max_number_of_null_pairs = 7957 # hard-code, just trust me!
         
         if oversample_factor_null_effect_pairs is not None:
             sample_n = int(len(train_pairs_dataset)*oversample_factor_null_effect_pairs)
@@ -448,14 +448,24 @@ def main():
         logger.warning(
             f"Trying to add in number of null example pairs = {number_of_train_dataset_null_pairs}."
         )
-        
+        logger.warning("***** Scaling number of epochs *****")
         max_number_of_true_counterfactuals = 19684
         if model_args.k > max_number_of_true_counterfactuals:
             model_args.k = max_number_of_true_counterfactuals
+        logger.warning(
+            f"max_number_of_null_pairs = {max_number_of_null_pairs}."
+        )
+        logger.warning(
+            f"max_number_of_true_counterfactuals = {max_number_of_true_counterfactuals}."
+        )
+        logger.warning(
+            f"len(train_pairs_dataset) = {len(train_pairs_dataset)}."
+        )
         training_args.num_train_epochs = int((max_number_of_null_pairs+max_number_of_true_counterfactuals)/len(train_pairs_dataset))*30.0
         logger.warning(
             f"Scaling the training epoch number = {training_args.num_train_epochs} based on maximum true counterfactuals."
         )
+
     elif model_args.counterfactual_type == "approximate":
         train_dataset_null_base = train_dataset.rename(columns=lambda x: x + '_base')
         train_dataset_null_counterfactual = train_dataset.rename(columns=lambda x: x + '_counterfactual')

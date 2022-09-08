@@ -105,6 +105,13 @@ class CausalProxyModelForBERT(Explainer, CausalExplainer):
         
         self.tokenizer = AutoTokenizer.from_pretrained("bert-base-uncased")
         
+        if "42" in cpm_model_path:
+            self.seed = 42
+        elif "66" in cpm_model_path:
+            self.seed = 66
+        elif "77" in cpm_model_path:
+            self.seed = 77
+            
     def preprocess_predict_proba(self, df):
         x = self.tokenizer(df['description'].to_list(), padding=True, truncation=True, return_tensors='pt')
         y = df['review_majority'].astype(int)
@@ -143,7 +150,7 @@ class CausalProxyModelForBERT(Explainer, CausalExplainer):
                 (dev_dataset[f"{intervention_type}_aspect_majority"]==\
                  intervention_aspect_counterfactual)
             ]
-            sampled_source = satisfied_rows.sample().iloc[0]
+            sampled_source = satisfied_rows.sample(random_state=self.seed).iloc[0]
             iit_pairs_dataset += [[
                 intervention_type,
                 row['description_base'],

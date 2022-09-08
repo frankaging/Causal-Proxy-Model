@@ -64,7 +64,8 @@ class CausalProxyModelTrainer(Trainer):
             self.eval_batch_size = args.per_device_eval_batch_size
         
         if self.args.do_train:
-            num_train_optimization_steps = math.ceil(len(train_dataset) / self.train_batch_size / args.gradient_accumulation_steps) * args.num_train_epochs
+            effective_batch_size = self.train_batch_size * args.gradient_accumulation_steps
+            num_train_optimization_steps = math.ceil(len(train_dataset) / effective_batch_size) * args.num_train_epochs
             logger.info("***** Running training *****")
             logger.info("  Num examples = %d", len(train_dataset))
             logger.info("  Batch size = %d", self.train_batch_size)
