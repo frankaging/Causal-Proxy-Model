@@ -69,7 +69,9 @@ class CausalProxyModelTrainer(Trainer):
             logger.info("***** Running training *****")
             logger.info("  Num examples = %d", len(train_dataset))
             logger.info("  Batch size = %d", self.train_batch_size)
+            logger.info("  Effective Batch size = %d", effective_batch_size)
             logger.info("  Num steps = %d", num_train_optimization_steps)
+            logger.info("  Num epochs = %d", args.num_train_epochs)
             self.num_train_optimization_steps = num_train_optimization_steps
         
         if self.args.do_eval:

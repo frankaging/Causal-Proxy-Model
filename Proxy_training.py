@@ -461,7 +461,7 @@ def main():
         logger.warning(
             f"len(train_pairs_dataset) = {len(train_pairs_dataset)}."
         )
-        training_args.num_train_epochs = int((max_number_of_null_pairs+max_number_of_true_counterfactuals)/len(train_pairs_dataset))*30.0
+        training_args.num_train_epochs =((max_number_of_null_pairs+max_number_of_true_counterfactuals)/len(train_pairs_dataset))*30.0
         logger.warning(
             f"Scaling the training epoch number = {training_args.num_train_epochs} based on maximum true counterfactuals."
         )
