@@ -309,6 +309,11 @@ class Trainer:
     def end_epoch(self):
         logger.info(f"{self.n_sequences_epoch} sequences have been trained during this epoch.")
 
+        if self.save_strategy == "epoch":
+            subdir_name = f"checkpoint-{self.epoch}"
+            new_dir = os.path.join(self.args.output_dir, subdir_name)
+            self.save_checkpoint(new_dir)
+        
         self.epoch += 1
         self.n_sequences_epoch = 0
         self.n_iter = 0
@@ -365,14 +370,14 @@ class Trainer:
         else:
             logger.info("Training is finished")
 
-    def save_checkpoint(self):
+    def save_checkpoint(self, new_dir=None):
         try:
             self.low_level_model.model.save_pretrained(
-                self.args.output_dir,
+                self.args.output_dir if new_dir is None else new_dir,
             )
         except:
             self.low_level_model.model.module.save_pretrained(
-                self.args.output_dir,
+                self.args.output_dir if new_dir is None else new_dir,
             )
             
     def _remove_unused_columns(self, dataset, description: Optional[str] = None):

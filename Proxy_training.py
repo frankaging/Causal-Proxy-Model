@@ -268,6 +268,12 @@ class ModelArguments:
             "help": "whether to only enforce distillation on non-pairing example pairs."}
     ) 
         
+    checkpoint_save_strategy: str = field(
+        default="none",
+        metadata={
+            "help": "If we do early stopping with in-training evaluation performance."}
+    )  
+        
 # In[ ]:
 
 
@@ -966,6 +972,7 @@ def main():
         num_of_cls_token=num_of_cls_token,
         cls_token_id=cls_token_id,
         any_batch_size=any_batch_size,
+        save_strategy=model_args.checkpoint_save_strategy,
     )
     
     if training_args.do_train:

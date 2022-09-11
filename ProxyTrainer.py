@@ -18,6 +18,7 @@ class CausalProxyModelTrainer(Trainer):
         num_of_cls_token,
         cls_token_id,
         any_batch_size,
+        save_strategy,
     ):
         super(CausalProxyModelTrainer, self).__init__(args, wandb_metadata)
         
@@ -36,6 +37,7 @@ class CausalProxyModelTrainer(Trainer):
         self.num_of_cls_token = num_of_cls_token
         self.cls_token_id = cls_token_id
         self.any_batch_size = any_batch_size
+        self.save_strategy = save_strategy
         self.aspect_encode = {
             0: "ambiance",
             1: "food",
