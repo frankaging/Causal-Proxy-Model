@@ -306,3 +306,55 @@ def intervene_neuron_logits(
             intervened_outputs.logits[0].cpu(), dim=-1
     ).detach()[0]
     return intervened_logits
+
+def fetch_reprs(explainer, test, control=False):
+
+    # put it into eval() mode.
+    explainer.cpm_model.model.eval()
+    explainer.blackbox_model.eval()
+    
+    interchange_layer = explainer.cpm_model.model.config.interchange_hidden_layer
+    h_dim = explainer.cpm_model.model.config.intervention_h_dim
+    aspects = ["ambiance", "food", "noise", "service"]
+    ret_reprs = {}
+    for a in aspects:
+        ret_reprs[a] = []
+
+    x = explainer.tokenizer(
+        test['description'].to_list(), 
+        padding=True, truncation=True, 
+        return_tensors='pt'
+    )
+    y = test['review_majority'].astype(int)
+    
+    # get the predictions batch per batch
+    batch_size = explainer.batch_size
+    hidden_reprs = []
+    for i in range(ceil(len(test) / explainer.batch_size)):
+        x_batch = {
+            k: v[i * batch_size:(i + 1) * batch_size].to(
+                explainer.device
+            ) for k, v in x.items()
+        }
+        if control:
+            cls_reprs = explainer.blackbox_model(
+                **x_batch,
+                output_hidden_states=True,
+            ).hidden_states[
+                interchange_layer
+            ][:,0,:].cpu().detach().data
+        else:
+            cls_reprs = explainer.cpm_model.model(**x_batch).hidden_states[
+                interchange_layer
+            ][:,0,:].cpu().detach().data
+        ambiance_reprs = cls_reprs[:,:h_dim]
+        food_reprs = cls_reprs[:,h_dim:h_dim*2]
+        noise_reprs = cls_reprs[:,h_dim*2:h_dim*3]
+        service_reprs = cls_reprs[:,h_dim*3:h_dim*4]
+
+        for j in range(ambiance_reprs.shape[0]):
+            ret_reprs["ambiance"].append(ambiance_reprs)
+            ret_reprs["food"].append(food_reprs)
+            ret_reprs["noise"].append(noise_reprs)
+            ret_reprs["service"].append(service_reprs)
+    return ret_reprs

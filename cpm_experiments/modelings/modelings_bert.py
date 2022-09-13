@@ -98,10 +98,13 @@ class CausalProxyModelForBERT(Explainer, CausalExplainer):
             config=cpm_config,
             cache_dir=cache_dir
         )
+
         cpm_model.to(device)
         self.cpm_model = InterventionableIITTransformerForSequenceClassification(
             model=cpm_model
         )
+        self.intervention_h_dim = self.cpm_model.model.config.intervention_h_dim
+        self.interchange_hidden_layer = self.cpm_model.model.config.interchange_hidden_layer
         
         self.tokenizer = AutoTokenizer.from_pretrained("bert-base-uncased")
         
