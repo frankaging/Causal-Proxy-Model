@@ -74,10 +74,12 @@ class CausalProxyModelForBERT(Explainer, CausalExplainer):
         cpm_model_path, 
         device, batch_size, 
         intervention_h_dim=1,
+        self_explain=False,
         cache_dir="../../huggingface_cache",
     ):
         self.batch_size = batch_size
         self.device = device
+        self.self_explain = self_explain
         # blackbox model loading.
         self.blackbox_model = BertForNonlinearSequenceClassification.from_pretrained(
             blackbox_model_path,
@@ -226,7 +228,18 @@ class CausalProxyModelForBERT(Explainer, CausalExplainer):
                 prediction_counterfactual_batch = torch.nn.functional.softmax(
                     counterfactual_outputs["logits"][0].cpu(), dim=-1
                 ).detach()
-                CPM_iTE = prediction_counterfactual_batch-prediction_base_batch
+                
+                if self.self_explain:
+                    prediction_base_self_batch = torch.nn.functional.softmax(
+                        self.cpm_model.model(
+                            input_ids=base_input_ids,
+                            attention_mask=base_attention_mask,
+                        ).logits[0].cpu(), dim=-1
+                    ).detach()
+                    CPM_iTE = prediction_counterfactual_batch-prediction_base_self_batch
+                else:
+                    CPM_iTE = prediction_counterfactual_batch-prediction_base_batch
+                
                 CPM_iTEs.append(CPM_iTE)
         CPM_iTEs = torch.concat(CPM_iTEs)
         CPM_iTEs = CPM_iTEs.numpy()

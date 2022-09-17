@@ -77,14 +77,12 @@ class CausalProxyModelForGPT2(Explainer, CausalExplainer):
         cpm_model_path, 
         device, batch_size, 
         intervention_h_dim=1,
-        min_iit_pair_examples=1,
-        match_non_int_type=False,
+        self_explain=False,
         cache_dir="../../huggingface_cache",
     ):
         self.batch_size = batch_size
         self.device = device
-        self.min_iit_pair_examples = min_iit_pair_examples
-        self.match_non_int_type = match_non_int_type
+        self.self_explain = self_explain
         # blackbox model loading.
         self.blackbox_model = GPT2ForNonlinearSequenceClassification.from_pretrained(
             blackbox_model_path,
