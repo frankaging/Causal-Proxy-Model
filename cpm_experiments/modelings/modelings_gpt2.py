@@ -70,7 +70,7 @@ class GPT2ForCEBaB(Model):
         return self.model.score
 
     
-class CausalProxyModelForGPT2(Explainer, CausalExplainer):
+class CausalProxyModelForGPT2(CausalExplainer):
     def __init__(
         self, 
         blackbox_model_path,
@@ -78,11 +78,15 @@ class CausalProxyModelForGPT2(Explainer, CausalExplainer):
         device, batch_size, 
         intervention_h_dim=1,
         self_explain=False,
+        random_source=False,
+        probe_sample_source=False,
         cache_dir="../../huggingface_cache",
     ):
         self.batch_size = batch_size
         self.device = device
         self.self_explain = self_explain
+        self.random_source = random_source
+        self.probe_sample_source = probe_sample_source
         # blackbox model loading.
         self.blackbox_model = GPT2ForNonlinearSequenceClassification.from_pretrained(
             blackbox_model_path,
@@ -121,121 +125,4 @@ class CausalProxyModelForGPT2(Explainer, CausalExplainer):
             self.seed = 66
         elif "77" in cpm_model_path:
             self.seed = 77
-        
-    def preprocess_predict_proba(self, df):
-        x = self.tokenizer(df['description'].to_list(), padding=True, truncation=True, return_tensors='pt')
-        y = df['review_majority'].astype(int)
-
-        return x, y
-        
-    def predict_proba(self, dataset):
-        self.cpm_model.model.eval()
-
-        x, y = self.preprocess_predict_proba(dataset)
-
-        # get the predictions batch per batch
-        probas = []
-        for i in range(ceil(len(dataset) / self.batch_size)):
-            x_batch = {k: v[i * self.batch_size:(i + 1) * self.batch_size].to(self.device) for k, v in x.items()}
-            probas.append(torch.nn.functional.softmax(self.cpm_model.model(**x_batch).logits[0].cpu(), dim=-1).detach())
-        probas = torch.concat(probas)
-
-        predictions = np.argmax(probas, axis=1)
-        clf_report = classification_report(y.to_numpy(), predictions, output_dict=True)
-
-        return probas, clf_report
-        
-    def fit(self, dataset, classifier_predictions, classifier, dev_dataset=None):
-        # we don't need to train IIT here.
-        pass
-    
-    def preprocess(self, pairs_dataset, dev_dataset):        
-        iit_pairs_dataset = []
-        for index, row in pairs_dataset.iterrows():
-            description_base = row['description_base']
-            prediction_base = row['prediction_base']
-            intervention_type = row['intervention_type']
-            intervention_aspect_counterfactual = row['intervention_aspect_counterfactual']
-            satisfied_rows = dev_dataset[
-                (dev_dataset[f"{intervention_type}_aspect_majority"]==\
-                 intervention_aspect_counterfactual)
-            ]
-            sampled_source = satisfied_rows.sample(random_state=self.seed).iloc[0]
-            iit_pairs_dataset += [[
-                intervention_type,
-                row['description_base'],
-                sampled_source["description"],
-                row["prediction_base"],
-            ]]
-
-        iit_pairs_dataset = pd.DataFrame(
-            columns=[
-                'intervention_type',
-                'description_base', 
-                'description_counterfactual', 
-                'prediction_base'], 
-            data=iit_pairs_dataset
-        )
-        aspect_encode = {
-            "ambiance":0,
-            "food":1,
-            "noise":2,
-            "service": 3,
-        }
-        iit_pairs_dataset = iit_pairs_dataset.replace(
-            {"intervention_type": aspect_encode,}
-        )
-        
-        base_x = self.tokenizer(
-            iit_pairs_dataset['description_base'].to_list(), 
-            padding=True, truncation=True, return_tensors='pt'
-        )
-        source_x = self.tokenizer(
-            iit_pairs_dataset['description_counterfactual'].to_list(), 
-            padding=True, truncation=True, return_tensors='pt'
-        )
-        intervention_type = torch.tensor(iit_pairs_dataset["intervention_type"]).long()
-        prediction_base = np.array(
-            [np.array(arr) for arr in iit_pairs_dataset["prediction_base"]]
-        )
-        prediction_base = torch.tensor(prediction_base).float()
-        return base_x, source_x, intervention_type, prediction_base
-    
-    def estimate_icace(self, pairs, df):
-        CPM_iTEs = []
-        self.cpm_model.model.eval()
-        base_x, source_x, intervention_type, prediction_base = self.preprocess(
-            pairs, df
-        )
-        with torch.no_grad():
-            for i in tqdm(range(ceil(intervention_type.shape[0]/self.batch_size))):
-                base_x_batch = {k:v[i*self.batch_size:(i+1)*self.batch_size] for k,v in base_x.items()} 
-                source_x_batch = {k:v[i*self.batch_size:(i+1)*self.batch_size] for k,v in source_x.items()} 
-                intervention_type_batch = intervention_type[i*self.batch_size:(i+1)*self.batch_size]
-                prediction_base_batch = prediction_base[i*self.batch_size:(i+1)*self.batch_size]
-                
-                base_input_ids = base_x_batch['input_ids']
-                base_attention_mask = base_x_batch['attention_mask']
-                source_input_ids = source_x_batch['input_ids']
-                source_attention_mask = source_x_batch['attention_mask']
-                base_input_ids = base_input_ids.to(self.device)
-                base_attention_mask = base_attention_mask.to(self.device)
-                source_input_ids = source_input_ids.to(self.device)
-                source_attention_mask = source_attention_mask.to(self.device)
-                intervention_type_batch = intervention_type_batch.to(self.device)
-                
-                _, _, counterfactual_outputs = self.cpm_model.forward(
-                    base=(base_input_ids, base_attention_mask),
-                    source=(source_input_ids, source_attention_mask),
-                    base_intervention_corr=intervention_type_batch,
-                    source_intervention_corr=intervention_type_batch,
-                )
-                prediction_counterfactual_batch = torch.nn.functional.softmax(
-                    counterfactual_outputs["logits"][0].cpu(), dim=-1
-                ).detach()
-                CPM_iTE = prediction_counterfactual_batch-prediction_base_batch
-                CPM_iTEs.append(CPM_iTE)
-        CPM_iTEs = torch.concat(CPM_iTEs)
-        CPM_iTEs = CPM_iTEs.numpy()
-        return list(CPM_iTEs)
     

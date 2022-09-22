@@ -33,8 +33,6 @@ from models.modelings_bert import *
 from models.modelings_gpt2 import *
 from models.modelings_lstm import *
 
-from cpm import *
-
 from eval_pipeline.models.abstract_model import Model 
 from eval_pipeline.explainers.abstract_explainer import Explainer
 from eval_pipeline.utils.data_utils import *
@@ -53,6 +51,8 @@ import matplotlib.pyplot as plt
 sns.set()
 from scipy.stats import pearsonr
 # plt.style.use("ggplot")
+
+from cpm import *
 
 plt.rcParams["font.family"] = "DejaVu Serif"
 font = {'family' : 'DejaVu Serif',
