@@ -55,7 +55,6 @@ python Proxy_training.py \
 --cache_dir ./train_cache/ \
 --seed 42 \
 --report_to none \
---wandb_metadata wuzhengx:Causal-Proxy-Model \
 --logging_steps 1 \
 --alpha 1.0 \
 --beta 1.0 \
