@@ -43,6 +43,15 @@ If you use this repository, please consider to cite our relevant papers:
 - Transfermers Version: 4.21.1
 - Datasets Version: Version: 2.3.2
 
+
+## Installation
+First clone the directory. Then run the following command to initialize the submodules:
+
+```bash
+git submodule init; git submodule update
+```
+
+
 ## Training **CPM<sub>IN</sub>**
 
 To train **CPM<sub>IN</sub>**, we follow the basic finetuning setup since the intervention is on the inputs. To train, you should first go to `CEBaB-inclusive/eval_pipeline/`; and you can run the following command to train.
