@@ -1,0 +1,3 @@
+[submodule "CEBaB-inclusive"]
+	path = CEBaB-inclusive
+	url = git@github.com:KarelDO/CEBaB-inclusive.git
