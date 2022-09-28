@@ -7,6 +7,7 @@
 import os
 import sys
 sys.path.append(os.path.join(os.path.dirname("__file__"), '.'))
+sys.path.append(os.path.join(os.path.dirname("__file__"), './CEBaB-inclusive/'))
 os.environ['TRANSFORMERS_CACHE'] = './huggingface_cache'
 os.environ['HF_HOME'] = './huggingface_cache'
 
