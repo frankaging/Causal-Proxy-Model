@@ -1,7 +1,10 @@
 ![Python 3.7](https://img.shields.io/badge/python-3.7-blueviolet.svg?style=plastic)
 ![License CC BY-NC](https://img.shields.io/badge/license-MIT-05b502.svg?style=plastic)
 
-# Causal Proxy Models For Concept-Based Model Explanations (CPM)
+<h1 align="center">
+  <b>Causal Proxy Models For Concept-Based Model Explanations</b>
+</h1>
+
 <p align="center">
   <b><a href="https://nlp.stanford.edu/~wuzhengx/">Zhengxuan Wu</a>*, <a href="https://www.kareldoosterlinck.com/">Karel D'Oosterlinck</a>*, <a href="https://atticusg.github.io/">Atticus Geiger</a>*, <a href="https://www.linkedin.com/in/amir-zur-a924ba187/">Amir Zur</a>, <a href="https://web.stanford.edu/~cgpotts/">Christopher Potts</a></b></span>
 </p>
@@ -10,7 +13,7 @@ The codebase contains some implementations of our preprint [Causal Proxy Models 
 * CPM<sub>IN</sub>: Input-base CPM uses auxiliary token to represent the intervention, and is trained in a supervised way of predicting counterfactual output. This model is built on an input-level intervention.
 * CPM<sub>HI</sub>: Hidden-state CPM uses Interchange Intervention Training (IIT) to localize concept information within its representations, and swaps hidden-states to represent the intervention. It is trained in a supervised way of predicting counterfactual output. This model is built on a hidden-state intervention.
 
-This codebase contains implementations and experiments for **CPM<sub>HI</sub>**. If you experience any issues or have suggestions, please contact me either thourgh the issues page or at wuzhengx@cs.stanford.edu. 
+This codebase contains implementations and experiments for both **CPM<sub>IN</sub>** and **CPM<sub>HI</sub>**. If you experience any issues or have suggestions, please contact me either thourgh the issues page or at wuzhengx@cs.stanford.edu or at karel.doosterlinck@ugent.be. 
 
 ## Citation
 If you use this repository, please consider to cite our relevant papers:
@@ -40,7 +43,27 @@ If you use this repository, please consider to cite our relevant papers:
 - Transfermers Version: 4.21.1
 - Datasets Version: Version: 2.3.2
 
+## Training **CPM<sub>IN</sub>**
+
+To train **CPM<sub>IN</sub>**, we follow the basic finetuning setup since the intervention is on the inputs. To train, you should first go to `CEBaB-inclusive/eval_pipeline/`; and you can run the following command to train.
+
+```bash
+python main.py \
+--model_architecture bert-base-uncased \
+--train_setting inclusive \
+--model_output_dir model_output \
+--output_dir output \
+--flush_cache true \
+--task_name opentable_5_way \
+--batch_size 128 \
+--k_array 19684
+```
+
+To train with different variants of *approximate counterfactuals*, you need to change the flag `--train_setting approximate` for metadata-sampled counterfactuals. Note that in this setting, you can ignore the field `--k_array`. You should change `--model_architecture` for different model architectures.
+
 ## Training **CPM<sub>HI</sub>**
+
+To train **CPM<sub>HI</sub>**, we adapt interchange intervention training (IIT). To train, you can use the following command, and you can refer to our paper for configurations.
 
 ```bash
 python Proxy_training.py \
@@ -67,4 +90,5 @@ python Proxy_training.py \
 --save_steps 10 \
 --early_stopping_patience 20
 ```
+To train with different variants of *approximate counterfactuals*, you need to change the flag `--counterfactual_type approximate` for metadata-sampled counterfactuals. Note that in this setting, you can ignore the field `--k`. You should change `--model_name_or_path` for different model architectures. These models can be downloaded from [CEBaB website](https://cebabing.github.io/CEBaB/).
 
