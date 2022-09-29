@@ -52,7 +52,7 @@ git submodule init; git submodule update
 ```
 
 ## Loading Black-box Models for CEBaB
-These models are avaliable from the (CEBaB website)[https://cebabing.github.io/CEBaB/]. Here is one example about how to load these models!
+These models are avaliable from the [CEBaB website](https://cebabing.github.io/CEBaB/). Here is one example about how to load these models!
 
 ```python
 from transformers import AutoTokenizer, BertForNonlinearSequenceClassification
@@ -63,7 +63,7 @@ model = BertForNonlinearSequenceClassification.from_pretrained("CEBaB/bert-base-
 ```
 
 ## Loading **CPMs** for CEBaB
-We aim to make all of our **CPMs** public. Currently, they are be found on (our huggingface repo)[https://huggingface.co/CPMs].
+We aim to make all of our **CPMs** public. Currently, they are be found on [our huggingface repo](https://huggingface.co/CPMs).
 
 ```python
 from transformers import AutoTokenizer, AutoModelForSequenceClassification
