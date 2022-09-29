@@ -9,7 +9,7 @@
   <b><a href="https://nlp.stanford.edu/~wuzhengx/">Zhengxuan Wu</a>*, <a href="https://www.kareldoosterlinck.com/">Karel D'Oosterlinck</a>*, <a href="https://atticusg.github.io/">Atticus Geiger</a>*, <a href="https://www.linkedin.com/in/amir-zur-a924ba187/">Amir Zur</a>, <a href="https://web.stanford.edu/~cgpotts/">Christopher Potts</a></b></span>
 </p>
 
-The codebase contains some implementations of our preprint [Causal Proxy Models For Concept-Based Model Explanations](https://nlp.stanford.edu/~wuzhengx/). In this paper, we introuce two variants of CPM, 
+The codebase contains some implementations of our preprint [Causal Proxy Models For Concept-Based Model Explanations](https://arxiv.org/abs/2209.14279). In this paper, we introuce two variants of CPM, 
 * CPM<sub>IN</sub>: Input-base CPM uses auxiliary token to represent the intervention, and is trained in a supervised way of predicting counterfactual output. This model is built on an input-level intervention.
 * CPM<sub>HI</sub>: Hidden-state CPM uses Interchange Intervention Training (IIT) to localize concept information within its representations, and swaps hidden-states to represent the intervention. It is trained in a supervised way of predicting counterfactual output. This model is built on a hidden-state intervention.
 
@@ -18,11 +18,11 @@ This codebase contains implementations and experiments for both **CPM<sub>IN</su
 ## Citation
 If you use this repository, please consider to cite our relevant papers:
 ```stex
-  @article{geiger-etal-2021-iit,
+  @article{wu-etal-2021-cpm,
         title={Causal Proxy Models For Concept-Based Model Explanations}, 
         author={Wu, Zhengxuan and D'Oosterlinck, Karel and Geiger, Atticus and Zur, Amir and Potts, Christopher},
         year={2022},
-        eprint={},
+        eprint={2209.14279},
         archivePrefix={arXiv},
         primaryClass={cs.LG}
   }
