@@ -51,6 +51,29 @@ First clone the directory. Then run the following command to initialize the subm
 git submodule init; git submodule update
 ```
 
+## Loading Black-box Models for CEBaB
+These models are avaliable from the (CEBaB website)[https://cebabing.github.io/CEBaB/]. Here is one example about how to load these models!
+
+```python
+from transformers import AutoTokenizer, BertForNonlinearSequenceClassification
+
+tokenizer = AutoTokenizer.from_pretrained("CEBaB/bert-base-uncased.CEBaB.sa.5-class.exclusive.seed_42")
+
+model = BertForNonlinearSequenceClassification.from_pretrained("CEBaB/bert-base-uncased.CEBaB.sa.5-class.exclusive.seed_42")
+```
+
+## Loading **CPMs** for CEBaB
+We aim to make all of our **CPMs** public. Currently, they are be found on (our huggingface repo)[https://huggingface.co/CPMs].
+
+```python
+from transformers import AutoTokenizer, AutoModelForSequenceClassification
+
+tokenizer = AutoTokenizer.from_pretrained("CPMs/cpm.hi.bert-base-uncased.layer.10.size.192")
+
+model = AutoModelForSequenceClassification.from_pretrained("CPMs/cpm.hi.bert-base-uncased.layer.10.size.192")
+```
+
+Note that we also have different helpers to load these models into our explainer module. Please refer to notebooks under `experiments` folder.
 
 ## Training **CPM<sub>IN</sub>**
 
